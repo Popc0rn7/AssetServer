@@ -1,0 +1,71 @@
+server:
+  host: 127.0.0.1
+  port: 7010
+
+gateway:
+  request_timeout_s: 3600
+  history_max_entries: 500
+  api_key: ${oc.env:ASSETSERVER_API_KEY,null}
+  rate_limit:
+    enabled: false
+    max_requests_per_minute: 60
+
+docker:
+  enabled: ${oc.env:ASSETSERVER_DOCKER_ENABLED,false}
+  network: ${oc.env:ASSETSERVER_DOCKER_NETWORK,null}
+  startup_timeout_s: 300
+  health_interval_s: 1.0
+  services:
+    postprocess:
+      enabled: true
+      image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+      container_name: assetserver-postprocess
+      command:
+        - python
+        - -m
+        - assetserver.postprocess_server.standalone_server
+        - --host
+        - 0.0.0.0
+        - --port
+        - "7100"
+        - --omp-threads
+        - "4"
+      ports:
+        - "7100:7100"
+      volumes:
+        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+
+# Persistent runtime services are part of AssetServer itself. They are configured
+# here because most pipelines depend on them and they are not treated as
+# replaceable generation/retrieval sources.
+runtime:
+  convex_decomposition:
+    enabled: true
+    host: 127.0.0.1
+    port: 7100
+    port_range: [7100, 7150]
+    omp_threads: null
+    server_startup_delay: 1.0
+    port_cleanup_delay: 1.0
+  postprocess_server:
+    enabled: true
+    host: 127.0.0.1
+    port: 7100
+    collision_method: coacd
+    timeout_s: 300
+
+# Replaceable tool declarations are loaded from these directories. Add a new YAML
+# file under config/generate or config/retrieve to make a backend discoverable
+# without changing Python code.
+tool_dirs:
+  - config/generate
+  - config/retrieve
+
+# Optional environment-specific overrides for discovered backend YAML files.
+# Example:
+# backends:
+#   hssd:
+#     enabled: true
+#     server:
+#       port: 7001
+backends: {}

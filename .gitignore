@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment & secrets
+.env
+*.env.local
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data & outputs (large files)
+data/
+outputs/
+external/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uv lock (optional; keep if you want reproducible builds)
+# uv.lock

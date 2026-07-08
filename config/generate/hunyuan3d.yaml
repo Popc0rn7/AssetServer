@@ -1,0 +1,36 @@
+name: hunyuan3d
+type: geometry_generation
+role: generate
+enabled: true
+
+server:
+  host: 127.0.0.1
+  port: 7002
+
+docker:
+  enabled: true
+  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+  container_name: assetserver-hunyuan3d
+  command:
+    - python
+    - -m
+    - assetserver.geometry_generation_server.standalone_server
+    - --host
+    - 0.0.0.0
+    - --port
+    - "7002"
+    - --backend
+    - hunyuan3d
+  ports:
+    - "7002:7002"
+  gpu: true
+  depends_on:
+    - postprocess
+  volumes:
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/external:/app/external"
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+
+params:
+  backend: hunyuan3d
+  preload_pipeline: false
+  use_mini: false

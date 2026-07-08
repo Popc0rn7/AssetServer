@@ -1,0 +1,42 @@
+name: sam3d
+type: geometry_generation
+role: generate
+enabled: true
+
+server:
+  host: 127.0.0.1
+  port: 7000
+
+docker:
+  enabled: true
+  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+  container_name: assetserver-sam3d
+  command:
+    - python
+    - -m
+    - assetserver.geometry_generation_server.standalone_server
+    - --host
+    - 0.0.0.0
+    - --port
+    - "7000"
+    - --backend
+    - sam3d
+  ports:
+    - "7000:7000"
+  gpu: true
+  depends_on:
+    - postprocess
+  volumes:
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/external:/app/external"
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+
+params:
+  backend: sam3d
+  preload_pipeline: false
+  use_mini: false
+  sam3d_config:
+    sam3_checkpoint: external/checkpoints/sam3.pt
+    sam3d_checkpoint: external/checkpoints/pipeline.yaml
+    mode: foreground
+    text_prompt: null
+    threshold: 0.5
