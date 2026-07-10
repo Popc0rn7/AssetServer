@@ -21,9 +21,9 @@ wheels/
 *~
 
 # Data & outputs (large files)
-data/
-outputs/
-external/
+/checkpoints
+/data
+/outputs
 
 # OS
 .DS_Store
@@ -31,3 +31,5 @@ Thumbs.db
 
 # uv lock (optional; keep if you want reproducible builds)
 # uv.lock
+
+.cache/

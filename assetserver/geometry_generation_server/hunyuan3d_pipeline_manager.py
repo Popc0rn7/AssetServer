@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 import time
 
+from pathlib import Path
 from typing import Any, Literal, Tuple
 
 import torch
@@ -84,23 +86,40 @@ class Hunyuan3DPipelineManager:
         if cls._shape_pipeline is not None:
             cls._cleanup_existing_pipelines()
 
-        # Configure model paths based on use_mini flag.
+        full_model_path = Path(
+            os.environ.get("HUNYUAN3D_MODEL_DIR", "checkpoints/Hunyuan3D-2")
+        )
+        mini_model_path = Path(
+            os.environ.get("HUNYUAN3D_MINI_MODEL_DIR", "checkpoints/Hunyuan3D-2mini")
+        )
+
+        if not full_model_path.exists():
+            raise FileNotFoundError(
+                f"Hunyuan3D full model not found at {full_model_path}. "
+                "Run scripts/download_hunyuan3d_checkpoints.sh first."
+            )
+
         if use_mini:
-            model_path = "tencent/Hunyuan3D-2mini"
+            if not mini_model_path.exists():
+                raise FileNotFoundError(
+                    f"Hunyuan3D mini model not found at {mini_model_path}. "
+                    "Run scripts/download_hunyuan3d_checkpoints.sh --include-mini first."
+                )
+            model_path = mini_model_path
             subfolder = "hunyuan3d-dit-v2-mini-turbo"
         else:
-            model_path = "tencent/Hunyuan3D-2"
+            model_path = full_model_path
             subfolder = "hunyuan3d-dit-v2-0-turbo"
 
         # Initialize shape generation pipeline.
         cls._shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            model_path, subfolder=subfolder
+            str(model_path), subfolder=subfolder
         )
         cls._shape_pipeline.enable_flashvdm()
 
         # Initialize texture generation pipeline (always uses full model).
         cls._texture_pipeline = Hunyuan3DPaintPipeline.from_pretrained(
-            "tencent/Hunyuan3D-2"
+            str(full_model_path)
         )
 
         # Initialize post-processing tools.

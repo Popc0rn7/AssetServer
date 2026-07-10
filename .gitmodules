@@ -1,0 +1,3 @@
+[submodule "submodules/scenesmith"]
+	path = submodules/scenesmith
+	url = https://github.com/nepfaff/scenesmith.git

@@ -1,0 +1,34 @@
+name: articulated
+type: articulated_retrieval
+role: retrieve
+enabled: false
+
+server:
+  host: 127.0.0.1
+  port: 7003
+
+docker:
+  enabled: true
+  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+  container_name: assetserver-articulated
+  command:
+    - python
+    - -m
+    - assetserver.articulated_retrieval_server.standalone_server
+    - --host
+    - 0.0.0.0
+    - --port
+    - "7003"
+  ports:
+    - "7003:7003"
+  gpu: true
+  volumes:
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+
+params:
+  preload_retriever: true
+  artvip_data_path: data/artvip_sdf
+  artvip_embeddings_path: data/artvip_sdf/embeddings
+  articulated_top_k: 5
+  clip_device: null

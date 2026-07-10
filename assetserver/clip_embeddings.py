@@ -5,6 +5,7 @@ ViT-H-14-378-quickgelu model with dfn5b pretrained weights (1024 dimensions).
 """
 
 import logging
+import os
 
 from pathlib import Path
 
@@ -21,6 +22,14 @@ _cached_model = None
 _cached_tokenizer = None
 _cached_preprocess = None
 _device = None
+
+
+def _openclip_cache_dir() -> Path:
+    """Return the shared OpenCLIP cache directory."""
+    configured = os.environ.get("ASSETSERVER_OPENCLIP_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parent.parent / "checkpoints" / "open_clip"
 
 
 def _get_clip_model(device: str | None = None):
@@ -50,12 +59,18 @@ def _get_clip_model(device: str | None = None):
         _device = target_device
 
         _cached_model, _, _cached_preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained, device=_device
+            model_name,
+            pretrained=pretrained,
+            device=_device,
+            cache_dir=str(_openclip_cache_dir()),
         )
-        _cached_tokenizer = open_clip.get_tokenizer(model_name)
+        _cached_tokenizer = open_clip.get_tokenizer(
+            model_name, cache_dir=str(_openclip_cache_dir())
+        )
 
         console_logger.info(
-            f"Loaded OpenCLIP model: {model_name} ({pretrained}) on {_device}"
+            f"Loaded OpenCLIP model: {model_name} ({pretrained}) on {_device} "
+            f"from cache {_openclip_cache_dir()}"
         )
 
     return _cached_model, _cached_tokenizer, _cached_preprocess, _device

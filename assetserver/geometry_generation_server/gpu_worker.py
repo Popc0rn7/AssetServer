@@ -221,6 +221,7 @@ def gpu_worker_main(
                     request=message.request,
                     generate_fn=generate_geometry_from_image,
                     use_mini=use_mini,
+                    sam3d_config=sam3d_config,
                 )
 
                 processing_time = time.time() - start_time
@@ -311,7 +312,10 @@ def _preload_pipeline(backend: str, use_mini: bool, sam3d_config: dict | None) -
 
 
 def _process_request(
-    request: GeometryGenerationServerRequest, generate_fn: Any, use_mini: bool
+    request: GeometryGenerationServerRequest,
+    generate_fn: Any,
+    use_mini: bool,
+    sam3d_config: dict | None,
 ) -> GeometryGenerationServerResponse:
     """Process a single geometry generation request.
 
@@ -319,12 +323,14 @@ def _process_request(
         request: The generation request.
         generate_fn: The geometry generation function.
         use_mini: Whether to use mini model variant.
+        sam3d_config: Default SAM3D configuration from server startup.
 
     Returns:
         Response containing path to generated geometry.
     """
     image_path = Path(request.image_path)
     output_dir = Path(request.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     prompt = request.prompt
     debug_folder = Path(request.debug_folder) if request.debug_folder else None
 
@@ -338,10 +344,14 @@ def _process_request(
 
     output_path = output_dir / output_filename
 
+    # Request config overrides the server default, but gateway callers should not need
+    # to send internal checkpoint paths.
+    effective_sam3d_config = request.sam3d_config or sam3d_config
+
     # Convert sam3d_config paths from strings to Path objects if present.
     processed_sam3d_config = None
-    if request.sam3d_config:
-        processed_sam3d_config = request.sam3d_config.copy()
+    if effective_sam3d_config:
+        processed_sam3d_config = effective_sam3d_config.copy()
         if "sam3_checkpoint" in processed_sam3d_config:
             processed_sam3d_config["sam3_checkpoint"] = Path(
                 processed_sam3d_config["sam3_checkpoint"]

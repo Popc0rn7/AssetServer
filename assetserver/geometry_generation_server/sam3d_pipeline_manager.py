@@ -97,18 +97,16 @@ class SAM3DPipelineManager:
             # Skip sam3d_objects initialization (init module is not present).
             os.environ["LIDRA_SKIP_INIT"] = "1"
 
+            project_root = Path(__file__).resolve().parents[2]
+
             # Add SAM3 to path.
-            sam3_path = Path(__file__).parent.parent.parent.parent / "external" / "SAM3"
+            sam3_path = project_root / "external" / "SAM3"
             if str(sam3_path) not in sys.path:
                 sys.path.insert(0, str(sam3_path))
             console_logger.debug(f"Added SAM3 path: {sam3_path}")
 
             # Add SAM 3D Objects to path.
-            sam3d_path = (
-                Path(__file__).parent.parent.parent.parent
-                / "external"
-                / "sam-3d-objects"
-            )
+            sam3d_path = project_root / "external" / "sam-3d-objects"
             if str(sam3d_path) not in sys.path:
                 sys.path.insert(0, str(sam3d_path))
             console_logger.debug(f"Added SAM3D path: {sam3d_path}")

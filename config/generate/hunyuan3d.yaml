@@ -1,7 +1,7 @@
 name: hunyuan3d
 type: geometry_generation
 role: generate
-enabled: true
+enabled: false
 
 server:
   host: 127.0.0.1
@@ -9,7 +9,7 @@ server:
 
 docker:
   enabled: true
-  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+  image: ${oc.env:ASSETSERVER_HUNYUAN3D_DOCKER_IMAGE,assetserver-hunyuan3d:latest}
   container_name: assetserver-hunyuan3d
   command:
     - python
@@ -26,8 +26,12 @@ docker:
   gpu: true
   depends_on:
     - postprocess
+  environment:
+    - HUNYUAN3D_MODEL_DIR=/app/checkpoints/Hunyuan3D-2
+    - HUNYUAN3D_MINI_MODEL_DIR=/app/checkpoints/Hunyuan3D-2mini
+    - HF_ENDPOINT=${oc.env:HF_ENDPOINT,https://huggingface.co}
   volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/external:/app/external"
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/checkpoints:/app/checkpoints"
     - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
 
 params:

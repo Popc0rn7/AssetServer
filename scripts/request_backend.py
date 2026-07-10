@@ -15,6 +15,8 @@ import requests
 DEFAULT_PORTS = {
     "sam3d": 7000,
     "hunyuan3d": 7002,
+    "articulated": 7003,
+    "materials": 7004,
     "hssd": 7001,
     "objaverse": 7007,
 }
@@ -84,15 +86,24 @@ def request_generation(args: argparse.Namespace) -> list[dict]:
 
 
 def request_retrieval(args: argparse.Namespace) -> list[dict]:
-    payload = [
-        {
-            "object_description": args.description,
-            "object_type": args.object_type,
-            "output_dir": args.output_dir,
-            "desired_dimensions": parse_dimensions(args.dimensions),
-            "num_candidates": args.num_candidates,
-        }
-    ]
+    if args.backend == "materials":
+        payload = [
+            {
+                "material_description": args.description,
+                "output_dir": args.output_dir,
+                "num_candidates": args.num_candidates,
+            }
+        ]
+    else:
+        payload = [
+            {
+                "object_description": args.description,
+                "object_type": args.object_type,
+                "output_dir": args.output_dir,
+                "desired_dimensions": parse_dimensions(args.dimensions),
+                "num_candidates": args.num_candidates,
+            }
+        ]
     return stream_request(
         f"http://{args.host}:{args.port}/retrieve_objects",
         payload,

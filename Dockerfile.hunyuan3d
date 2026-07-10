@@ -1,0 +1,88 @@
+# Dedicated Hunyuan3D serving image.
+#
+# This image contains the runtime needed to serve the Hunyuan3D backend over the
+# AssetServer geometry generation HTTP API. Model weights are mounted at runtime.
+
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS base
+
+ARG GITHUB_URL_PREFIX=""
+ARG HUNYUAN3D_COMMIT=""
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG ALL_PROXY=""
+ARG NO_PROXY=""
+ARG http_proxy=""
+ARG https_proxy=""
+ARG all_proxy=""
+ARG no_proxy=""
+ARG PYPI_INDEX_URL=""
+ARG UV_HTTP_TIMEOUT="300"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    libpython3.11-dev \
+    git \
+    git-lfs \
+    wget \
+    unzip \
+    cmake \
+    build-essential \
+    libgl1 \
+    libegl1 \
+    libxrender1 \
+    libxkbcommon0 \
+    libsm6 \
+    libxext6 \
+    libxi6 \
+    libxxf86vm1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+ENV CUDA_HOME=/usr/local/cuda-12.4
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+ENV GITHUB_URL_PREFIX=${GITHUB_URL_PREFIX}
+ENV HUNYUAN3D_COMMIT=${HUNYUAN3D_COMMIT}
+ENV PYPI_INDEX_URL=${PYPI_INDEX_URL}
+ENV UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT}
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version README.md ./
+RUN if [ -n "$PYPI_INDEX_URL" ]; then \
+        export UV_INDEX_URL="$PYPI_INDEX_URL" PIP_INDEX_URL="$PYPI_INDEX_URL"; \
+        uv sync --frozen --no-dev --group generate; \
+    else \
+        uv sync --frozen --no-dev --group generate; \
+    fi
+
+COPY scripts/install_hunyuan3d.sh ./scripts/install_hunyuan3d.sh
+COPY scripts/install_hunyuan3d_docker.sh ./scripts/install_hunyuan3d_docker.sh
+
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV HUNYUAN3D_MODEL_DIR=/app/checkpoints/Hunyuan3D-2
+ENV HUNYUAN3D_MINI_MODEL_DIR=/app/checkpoints/Hunyuan3D-2mini
+
+RUN bash scripts/install_hunyuan3d_docker.sh
+
+COPY assetserver ./assetserver
+
+CMD ["python", "-m", "assetserver.geometry_generation_server.standalone_server", "--host", "0.0.0.0", "--port", "7002", "--backend", "hunyuan3d"]

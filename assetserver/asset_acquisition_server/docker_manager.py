@@ -48,11 +48,15 @@ class DockerBackendManager:
 
     @property
     def enabled(self) -> bool:
-        return _as_bool(self._docker_config().get("enabled", False))
+        return self.launch_backend
+
+    @property
+    def launch_backend(self) -> bool:
+        return _as_bool(self._docker_config().get("launch_backend", False))
 
     def ensure_backend_running(self, backend: BackendSpec) -> None:
         """Start backend dependencies and the backend container when configured."""
-        if not self.enabled:
+        if not self.launch_backend:
             return
 
         backend_docker = backend.config.get("docker", {})
@@ -72,7 +76,7 @@ class DockerBackendManager:
 
     def ensure_named_service_running(self, service_name: str) -> None:
         """Start a globally configured Docker service such as postprocess."""
-        if not self.enabled:
+        if not self.launch_backend:
             return
 
         service_config = self._service_config(service_name)
@@ -93,10 +97,12 @@ class DockerBackendManager:
     def service_statuses(self, backends: list[BackendSpec]) -> list[dict[str, Any]]:
         statuses: list[DockerServiceStatus] = []
         docker_cfg = self._docker_config()
-        if not self.enabled:
+        if not self.launch_backend:
             for service_name, service_config in docker_cfg.get("services", {}).items():
                 statuses.append(
-                    self._configured_disabled_status(str(service_name), service_config)
+                    self._configured_disabled_status(
+                        str(service_name), service_config
+                    )
                 )
             for backend in backends:
                 statuses.append(
@@ -139,7 +145,7 @@ class DockerBackendManager:
             container_name=service_config.get("container_name")
             or f"assetserver-{name}",
             image=service_config.get("image"),
-            status="docker_disabled",
+            status="launch_disabled",
         )
 
     def _ensure_container_running(
@@ -188,6 +194,10 @@ class DockerBackendManager:
         if environment:
             kwargs["environment"] = environment
 
+        extra_hosts = _normalize_extra_hosts(service_config.get("extra_hosts"))
+        if extra_hosts:
+            kwargs["extra_hosts"] = extra_hosts
+
         volumes = _normalize_volumes(service_config.get("volumes"))
         if volumes:
             kwargs["volumes"] = volumes
@@ -205,8 +215,14 @@ class DockerBackendManager:
                 kwargs["ports"] = ports
 
         if _as_bool(service_config.get("gpu", False)):
+            gpu_device = service_config.get("gpu_device")
+            request_kwargs: dict[str, Any] = {"capabilities": [["gpu"]]}
+            if gpu_device not in (None, ""):
+                request_kwargs["device_ids"] = [str(gpu_device)]
+            else:
+                request_kwargs["count"] = -1
             kwargs["device_requests"] = [
-                docker_module.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
+                docker_module.types.DeviceRequest(**request_kwargs)
             ]
 
         return self._docker_client().containers.run(service_config["image"], **kwargs)
@@ -325,6 +341,19 @@ def _normalize_ports(ports: Any) -> dict[str, Any]:
         text = str(value)
         host_port, container_port = text.split(":", maxsplit=1)
         normalized[f"{container_port}/tcp"] = int(host_port)
+    return normalized
+
+
+def _normalize_extra_hosts(extra_hosts: Any) -> dict[str, str]:
+    if not extra_hosts:
+        return {}
+    if isinstance(extra_hosts, dict):
+        return {str(host): str(address) for host, address in extra_hosts.items()}
+
+    normalized: dict[str, str] = {}
+    for value in extra_hosts:
+        host, address = str(value).split(":", maxsplit=1)
+        normalized[host] = address
     return normalized
 
 

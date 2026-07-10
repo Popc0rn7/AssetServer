@@ -67,13 +67,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--sam3-checkpoint",
         type=str,
-        default="external/checkpoints/sam3.pt",
+        default="checkpoints/sam3.pt",
         help="Path to SAM3 segmentation model checkpoint (default: %(default)s).",
     )
     parser.add_argument(
         "--sam3d-checkpoint",
         type=str,
-        default="external/checkpoints/pipeline.yaml",
+        default="checkpoints/pipeline.yaml",
         help="Path to SAM 3D Objects pipeline config (default: %(default)s).",
     )
     parser.add_argument(

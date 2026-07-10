@@ -115,7 +115,7 @@ class AssetAcquisitionApp:
             "gateway": self._gateway_config(),
             "runtime": self._runtime_config(),
             "docker": {
-                "enabled": self._docker_manager.enabled,
+                "launch_backend": self._docker_manager.launch_backend,
             },
         }
 
@@ -135,7 +135,7 @@ class AssetAcquisitionApp:
         return {
             "enabled": [backend.to_dict() for backend in backends],
             "docker": {
-                "enabled": self._docker_manager.enabled,
+                "launch_backend": self._docker_manager.launch_backend,
                 "services": self._docker_manager.service_statuses(backends),
             },
         }
@@ -166,6 +166,14 @@ class AssetAcquisitionApp:
             backend_name=backend_name,
             expected_role="retrieve",
         )
+        if self._retrieve_server_enabled():
+            return await self._proxy_request(
+                request=request,
+                backend=backend,
+                upstream_path=f"/retrieve/{backend_name}",
+                upstream_base_url=self._retrieve_server_base_url(),
+                ensure_backend=False,
+            )
         return await self._proxy_request(
             request=request,
             backend=backend,
@@ -176,24 +184,31 @@ class AssetAcquisitionApp:
         self, backend_name: str, asset_id: str, request: Request
     ) -> StreamingResponse:
         backend = self._require_backend(backend_name=backend_name)
+        if backend.role == "retrieve" and self._retrieve_server_enabled():
+            return await self._proxy_request(
+                request=request,
+                backend=backend,
+                upstream_path=f"/assets/{asset_id}",
+                upstream_base_url=self._retrieve_server_base_url(),
+                ensure_backend=False,
+            )
         return await self._proxy_request(
             request=request,
             backend=backend,
             upstream_path=f"/assets/{asset_id}",
         )
 
-    def _generate_assets_endpoint(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def _generate_assets_endpoint(self, request: Request) -> Any:
         if self._generate_assets_handler is None:
-            raise HTTPException(
-                status_code=501,
-                detail=(
-                    "The gateway is running in traffic-forwarding mode. Use "
-                    "/generate/{backend} or /retrieve/{backend}, or provide a "
-                    "generate_assets_handler for orchestration."
-                ),
+            backend = await self._select_generate_assets_backend(request)
+            return await self._proxy_request(
+                request=request,
+                backend=backend,
+                upstream_path="/generate_geometries",
             )
 
         try:
+            data = await request.json()
             request = AssetAcquisitionServerRequest.from_dict(data)
             request.validate()
             response = self._generate_assets_handler(request)
@@ -203,6 +218,58 @@ class AssetAcquisitionApp:
         except Exception as e:
             console_logger.exception("Asset acquisition request failed")
             raise HTTPException(status_code=500, detail=str(e)) from e
+
+    async def _select_generate_assets_backend(self, request: Request) -> BackendSpec:
+        """Pick the generate backend for the legacy /generate_assets route.
+
+        In gateway-only mode this route is a compatibility alias for the lower-level
+        generation API. If exactly one generate backend is enabled, use it. If the
+        caller includes "backend" in the JSON body, honor that selection.
+        """
+        requested_backend = await self._requested_backend_from_body(request)
+        if requested_backend:
+            return self._require_backend(
+                backend_name=requested_backend,
+                expected_role="generate",
+            )
+
+        generate_backends = [
+            backend
+            for backend in self._enabled_backend_specs()
+            if backend.role == "generate"
+        ]
+        if len(generate_backends) == 1:
+            return generate_backends[0]
+        if not generate_backends:
+            raise HTTPException(
+                status_code=404,
+                detail="No enabled generate backend is available for /generate_assets",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Multiple generate backends are enabled; include a 'backend' field "
+                "or use /generate/{backend}."
+            ),
+        )
+
+    async def _requested_backend_from_body(self, request: Request) -> str | None:
+        try:
+            data = await request.json()
+        except Exception:
+            return None
+
+        if isinstance(data, dict):
+            value = data.get("backend") or data.get("backend_name")
+            return str(value) if value else None
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("backend") or item.get("backend_name")
+                if value:
+                    return str(value)
+        return None
 
     def _asset_endpoint(self, asset_id: str) -> FileResponse:
         path = GLOBAL_ARTIFACTS.get(asset_id)
@@ -217,6 +284,8 @@ class AssetAcquisitionApp:
         request: Request,
         backend: BackendSpec,
         upstream_path: str,
+        upstream_base_url: str | None = None,
+        ensure_backend: bool = True,
     ) -> StreamingResponse:
         start = time.time()
         request_id = str(uuid.uuid4())
@@ -224,14 +293,30 @@ class AssetAcquisitionApp:
 
         self._authorize(request)
         self._check_rate_limit(client_id)
-        await to_thread(self._docker_manager.ensure_backend_running, backend)
+        if ensure_backend:
+            try:
+                await to_thread(self._docker_manager.ensure_backend_running, backend)
+            except Exception as e:
+                console_logger.exception(
+                    "Failed to ensure Docker backend '%s' is running", backend.name
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Failed to start backend '{backend.name}' via Docker: {e}"
+                    ),
+                ) from e
 
-        upstream_url = self._upstream_url(backend, upstream_path)
+        upstream_url = (
+            f"{upstream_base_url}{upstream_path}"
+            if upstream_base_url
+            else self._upstream_url(backend, upstream_path)
+        )
 
         headers = self._forward_headers(request, request_id)
         body = await request.body()
         timeout = httpx.Timeout(self._gateway_float("request_timeout_s", 3600.0))
-        http_client = httpx.AsyncClient(timeout=timeout)
+        http_client = httpx.AsyncClient(timeout=timeout, trust_env=False)
         status_code: int | None = None
 
         try:
@@ -320,6 +405,21 @@ class AssetAcquisitionApp:
                 detail=f"Backend '{backend.name}' is missing server.host/server.port",
             )
         return f"http://{host}:{port}{upstream_path}"
+
+    def _retrieve_server_enabled(self) -> bool:
+        retrieve_server = self._runtime_config().get("retrieve_server", {})
+        return bool(retrieve_server.get("enabled", False))
+
+    def _retrieve_server_base_url(self) -> str:
+        retrieve_server = self._runtime_config().get("retrieve_server", {})
+        host = retrieve_server.get("host")
+        port = retrieve_server.get("port")
+        if not host or not port:
+            raise HTTPException(
+                status_code=500,
+                detail="runtime.retrieve_server is missing host/port",
+            )
+        return f"http://{host}:{port}"
 
     def _authorize(self, request: Request) -> None:
         api_key = self._gateway_value("api_key")

@@ -10,7 +10,7 @@ services:
       # Data directories (download on host, mount into container).
       - ./data:/app/data
       # SAM3D model checkpoints (requires HuggingFace auth).
-      - ./external/checkpoints:/app/external/checkpoints
+      - ./checkpoints:/app/checkpoints
       # Generated scene outputs.
       - ./outputs:/app/outputs
     ports:

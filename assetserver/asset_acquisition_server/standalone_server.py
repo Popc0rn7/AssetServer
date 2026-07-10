@@ -47,7 +47,8 @@ def main() -> None:
         len(enabled_backend_specs(cfg)),
     )
     console_logger.info(
-        "No AssetManager handler is wired yet; /generate_assets returns 501."
+        "/generate_assets proxies to the enabled generate backend when no "
+        "AssetManager handler is wired."
     )
 
     try:

@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 asset-acquisition-server = "assetserver.asset_acquisition_server.standalone_server:main"
+retrieve-server = "assetserver.retrieve_server.standalone_server:main"
 
 [dependency-groups]
 dev = [

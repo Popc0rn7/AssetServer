@@ -285,7 +285,7 @@ echo ""
 echo "Installing MoGe depth model..."
 uv pip install "git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b"
 
-cd ..
+cd ../..
 
 echo ""
 echo "✓ All dependencies installed"
@@ -335,23 +335,21 @@ else
     echo "✓ SAM 3D Objects checkpoints already exist"
 fi
 
-cd ..
-
 echo ""
 echo "========================================="
 echo "SAM3D Installation Complete!"
 echo "========================================="
 echo ""
-echo "Checkpoints located in: external/checkpoints/"
-echo "  SAM3: external/checkpoints/sam3.pt"
-echo "  SAM 3D Objects: external/checkpoints/*.{ckpt,pt,yaml}"
+echo "Checkpoints located in: checkpoints/"
+echo "  SAM3: checkpoints/sam3.pt"
+echo "  SAM 3D Objects: checkpoints/*.{ckpt,pt,yaml}"
 echo ""
 echo "To use SAM3D backend, update your config:"
 echo "  asset_manager:"
 echo "    backend: \"sam3d\""
 echo "    sam3d:"
-echo "      sam3_checkpoint: \"external/checkpoints/sam3.pt\""
-echo "      sam3d_checkpoint: \"external/checkpoints/pipeline.yaml\""
+echo "      sam3_checkpoint: \"checkpoints/sam3.pt\""
+echo "      sam3d_checkpoint: \"checkpoints/pipeline.yaml\""
 echo ""
 echo "Note: SAM 3D Objects uses pipeline.yaml which references other checkpoints."
 echo ""

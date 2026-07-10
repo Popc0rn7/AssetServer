@@ -48,8 +48,8 @@ class GeometryGenerationServer:
 
     Example (SAM3D):
         >>> sam3d_config = {
-        ...     "sam3_checkpoint": "external/checkpoints/sam3_hiera_b+_1104.pt",
-        ...     "sam3d_checkpoint": "external/checkpoints/sam_3d_objects.ckpt",
+        ...     "sam3_checkpoint": "checkpoints/sam3.pt",
+        ...     "sam3d_checkpoint": "checkpoints/pipeline.yaml",
         ...     "mode": "foreground",
         ...     "text_prompt": None,
         ...     "threshold": 0.5,

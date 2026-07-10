@@ -11,7 +11,7 @@ gateway:
     max_requests_per_minute: 60
 
 docker:
-  enabled: ${oc.env:ASSETSERVER_DOCKER_ENABLED,false}
+  launch_backend: ${oc.env:ASSETSERVER_DOCKER_LAUNCH_BACKEND,false}
   network: ${oc.env:ASSETSERVER_DOCKER_NETWORK,null}
   startup_timeout_s: 300
   health_interval_s: 1.0
@@ -53,6 +53,12 @@ runtime:
     port: 7100
     collision_method: coacd
     timeout_s: 300
+  retrieve_server:
+    enabled: false
+    host: 127.0.0.1
+    port: 7005
+    preload: true
+    clip_device: null
 
 # Replaceable tool declarations are loaded from these directories. Add a new YAML
 # file under config/generate or config/retrieve to make a backend discoverable

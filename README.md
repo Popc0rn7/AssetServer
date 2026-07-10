@@ -34,11 +34,31 @@ SAM3D requires its external repositories and checkpoints:
 bash scripts/install_sam3d.sh
 ```
 
+To download or resume only the checkpoints, use:
+
+```bash
+bash scripts/download_sam3d_checkpoints.sh
+```
+
+By default checkpoints are stored in `checkpoints/`. Use
+`--checkpoint-dir /path/to/checkpoints` to place them elsewhere, then update the
+SAM3D paths in `config/generate/sam3d.yaml`.
+
 Hunyuan3D requires `external/Hunyuan3D-2`:
 
 ```bash
 bash scripts/install_hunyuan3d.sh
 ```
+
+Download or resume Hunyuan3D model weights into `checkpoints/Hunyuan3D-2`:
+
+```bash
+bash scripts/download_hunyuan3d_checkpoints.sh
+```
+
+Set `HF_ENDPOINT=https://hf-mirror.com` before running the script to use a
+Hugging Face mirror. Add `--include-mini` if `params.use_mini` is enabled for
+Hunyuan3D.
 
 ## Configuration
 
@@ -149,25 +169,36 @@ The gateway does not perform model generation, retrieval, or collision
 decomposition. It forwards requests to enabled backend servers and records
 gateway-level state.
 
-## Gateway Docker API Mode
+## Gateway Docker Backend Launch
 
-The gateway can manage backend containers through the Docker SDK. This mode is
-off by default. Enable it only on trusted machines because access to
+The gateway normally runs on the host and forwards traffic to backend servers.
+Backend containers can be started manually, or the gateway can manage them
+through the Docker SDK. Automatic launch is off by default. Enable it only on
+trusted machines because access to
 `/var/run/docker.sock` is effectively host-level control.
 
-Build the shared image:
+Build backend images as needed:
 
 ```bash
-docker compose build
+bash scripts/build_sam3d_image.sh --sudo
+bash scripts/build_hunyuan3d_image.sh --sudo
 ```
 
-Run the gateway with Docker API access:
+Run the gateway on the host without automatic Docker launch:
 
 ```bash
-docker compose -f docker-compose.yaml -f docker-compose.docker-api.yaml up assetserver
+ASSETSERVER_DOCKER_LAUNCH_BACKEND=false \
+uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --port 7010
 ```
 
-When Docker mode is enabled, the gateway checks the requested backend before
+Start backend containers manually from local YAML config:
+
+```bash
+bash scripts/run_sam3d_docker.sh
+bash scripts/run_hunyuan3d_docker.sh
+```
+
+If automatic launch is enabled, the gateway checks the requested backend before
 proxying:
 
 1. Start configured dependencies, currently `postprocess`.
@@ -191,8 +222,7 @@ curl http://127.0.0.1:7010/backends
 Important environment variables:
 
 ```bash
-export ASSETSERVER_DOCKER_ENABLED=true
-export ASSETSERVER_DOCKER_IMAGE=assetserver:latest
+export ASSETSERVER_DOCKER_LAUNCH_BACKEND=true
 export ASSETSERVER_HOST_ROOT="$PWD"
 ```
 
@@ -318,18 +348,53 @@ Artifact download:
 
 ## Docker
 
-Build and run the gateway image:
+Build dedicated serving images:
 
 ```bash
-docker compose up assetserver
+bash scripts/build_sam3d_image.sh --sudo
+bash scripts/build_hunyuan3d_image.sh --sudo
 ```
 
-Run a backend in the image:
+Both build scripts accept the same network environment variables. If GitHub is
+slow or blocked, use a GitHub URL prefix:
 
 ```bash
-docker compose run --rm -p 7000:7000 assetserver \
-  python -m assetserver.geometry_generation_server.standalone_server \
-  --host 0.0.0.0 --port 7000 --backend sam3d
+GITHUB=https://gh-proxy.com/https://github.com/ \
+  bash scripts/build_sam3d_image.sh --sudo
+GITHUB=https://gh-proxy.com/https://github.com/ \
+  bash scripts/build_hunyuan3d_image.sh --sudo
 ```
 
-Mount dataset and checkpoint directories as shown in `docker-compose.yaml`.
+or an HTTP/SOCKS proxy reachable from the build container:
+
+```bash
+bash scripts/build_sam3d_image.sh --sudo \
+  --proxy http://host.docker.internal:7890
+bash scripts/build_hunyuan3d_image.sh --sudo \
+  --proxy http://host.docker.internal:7890
+```
+
+Use a PyPI mirror for Python package downloads:
+
+```bash
+PYPI=https://pypi.tuna.tsinghua.edu.cn/simple \
+  bash scripts/build_sam3d_image.sh --sudo
+PYPI=https://pypi.tuna.tsinghua.edu.cn/simple \
+  bash scripts/build_hunyuan3d_image.sh --sudo
+```
+
+The Hunyuan3D image clones `Tencent-Hunyuan/Hunyuan3D-2` during build. Hunyuan3D
+model weights should be downloaded to `checkpoints/Hunyuan3D-2` before running
+the container.
+
+Run backends from their YAML config:
+
+```bash
+bash scripts/run_sam3d_docker.sh
+bash scripts/run_hunyuan3d_docker.sh
+```
+
+The scripts read `config/generate/sam3d.yaml` and
+`config/generate/hunyuan3d.yaml`, including image, port, command, GPU flag, and
+volume mounts. Use `scripts/run_backend_docker.py BACKEND --print` to inspect
+the generated `docker run` command.

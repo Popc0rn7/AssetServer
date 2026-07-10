@@ -1,7 +1,7 @@
 name: sam3d
 type: geometry_generation
 role: generate
-enabled: true
+enabled: true 
 
 server:
   host: 127.0.0.1
@@ -9,7 +9,7 @@ server:
 
 docker:
   enabled: true
-  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
+  image: ${oc.env:ASSETSERVER_SAM3D_DOCKER_IMAGE,assetserver-sam3d:latest}
   container_name: assetserver-sam3d
   command:
     - python
@@ -24,10 +24,20 @@ docker:
   ports:
     - "7000:7000"
   gpu: true
+  gpu_device: ${oc.env:ASSETSERVER_SAM3D_GPU_DEVICE,0}
   depends_on:
     - postprocess
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  environment:
+    - HF_HOME=/app/checkpoints/hf-cache
+    - TORCH_HOME=/app/checkpoints/torch-cache
+    - HF_ENDPOINT=${oc.env:HF_ENDPOINT,https://huggingface.co}
+    - ASSETSERVER_POSTPROCESS_HOST=${oc.env:ASSETSERVER_POSTPROCESS_HOST,host.docker.internal}
+    - ASSETSERVER_POSTPROCESS_PORT=${oc.env:ASSETSERVER_POSTPROCESS_PORT,7100}
+    - PYTHONPATH=/app:/app/external/SAM3:/app/external/sam-3d-objects
   volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/external:/app/external"
+    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/checkpoints:/app/checkpoints"
     - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
 
 params:
@@ -35,8 +45,8 @@ params:
   preload_pipeline: false
   use_mini: false
   sam3d_config:
-    sam3_checkpoint: external/checkpoints/sam3.pt
-    sam3d_checkpoint: external/checkpoints/pipeline.yaml
+    sam3_checkpoint: checkpoints/sam3.pt
+    sam3d_checkpoint: checkpoints/pipeline.yaml
     mode: foreground
     text_prompt: null
     threshold: 0.5
