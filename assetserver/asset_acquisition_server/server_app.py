@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from omegaconf import OmegaConf
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
@@ -44,6 +44,16 @@ HOP_BY_HOP_HEADERS = {
 }
 
 
+def rewrite_sam3d_download_url(data: dict[str, Any]) -> dict[str, Any]:
+    rewritten = dict(data)
+    asset = dict(rewritten.get("asset") or {})
+    asset_id = asset.get("asset_id")
+    if asset_id:
+        asset["download_url"] = f"/v1/assets/sam3d/{asset_id}"
+        rewritten["asset"] = asset
+    return rewritten
+
+
 @dataclass
 class GatewayHistoryEntry:
     request_id: str
@@ -64,9 +74,15 @@ class AssetAcquisitionApp:
         self,
         generate_assets_handler: GenerateAssetsHandler | None = None,
         config: Any | None = None,
+        retrieval_engine: Any | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
+        if retrieval_engine is None and config is not None:
+            from assetserver.retrieval import RetrievalEngine
+
+            retrieval_engine = RetrievalEngine.from_config(config)
+        self._retrieval_engine = retrieval_engine
         self._docker_manager = DockerBackendManager(config)
         self._history: deque[GatewayHistoryEntry] = deque(
             maxlen=self._gateway_int("history_max_entries", 500)
@@ -90,13 +106,23 @@ class AssetAcquisitionApp:
             methods=["POST"],
         )
         self.app.add_api_route(
-            "/retrieve/{backend_name}",
-            self._proxy_retrieve_endpoint,
+            "/v1/generate/sam3d",
+            self._proxy_sam3d_generate_endpoint,
             methods=["POST"],
         )
         self.app.add_api_route(
-            "/assets/{backend_name}/{asset_id}",
-            self._proxy_asset_endpoint,
+            "/v1/assets/sam3d/{asset_id}",
+            self._proxy_sam3d_asset_endpoint,
+            methods=["GET"],
+        )
+        self.app.add_api_route(
+            "/v1/retrieve/{source}",
+            self._retrieve_v1_endpoint,
+            methods=["POST"],
+        )
+        self.app.add_api_route(
+            "/v1/assets/{source}/{asset_id}",
+            self._retrieve_asset_v1_endpoint,
             methods=["GET"],
         )
         self.app.add_api_route(
@@ -125,8 +151,8 @@ class AssetAcquisitionApp:
             "all": [backend.to_dict() for backend in self._backend_specs()],
             "routes": {
                 "generate": "/generate/{backend}",
-                "retrieve": "/retrieve/{backend}",
-                "assets": "/assets/{backend}/{asset_id}",
+                "retrieve": "/v1/retrieve/{source}",
+                "assets": "/v1/assets/{source}/{asset_id}",
             },
         }
 
@@ -148,7 +174,7 @@ class AssetAcquisitionApp:
 
     async def _proxy_generate_endpoint(
         self, backend_name: str, request: Request
-    ) -> StreamingResponse:
+    ) -> Response:
         backend = self._require_backend(
             backend_name=backend_name,
             expected_role="generate",
@@ -159,43 +185,106 @@ class AssetAcquisitionApp:
             upstream_path="/generate_geometries",
         )
 
-    async def _proxy_retrieve_endpoint(
-        self, backend_name: str, request: Request
-    ) -> StreamingResponse:
-        backend = self._require_backend(
-            backend_name=backend_name,
-            expected_role="retrieve",
-        )
-        if self._retrieve_server_enabled():
-            return await self._proxy_request(
-                request=request,
-                backend=backend,
-                upstream_path=f"/retrieve/{backend_name}",
-                upstream_base_url=self._retrieve_server_base_url(),
-                ensure_backend=False,
+    async def _proxy_sam3d_generate_endpoint(
+        self, request: Request
+    ) -> JSONResponse:
+        backend = self._require_backend("sam3d", expected_role="generate")
+        self._authorize(request)
+        self._check_rate_limit(self._client_id(request))
+        try:
+            await to_thread(self._docker_manager.ensure_backend_running, backend)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        upstream_url = self._upstream_url(backend, "/v1/sam3d/generations")
+        headers = self._forward_headers(request, str(uuid.uuid4()))
+        timeout = httpx.Timeout(self._gateway_float("request_timeout_s", 3600.0))
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(
+                upstream_url, content=await request.body(), headers=headers
             )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="invalid SAM3D response") from exc
+        if response.status_code >= 400:
+            return JSONResponse(data, status_code=response.status_code)
+        return JSONResponse(rewrite_sam3d_download_url(data))
+
+    async def _proxy_sam3d_asset_endpoint(
+        self, asset_id: str, request: Request
+    ) -> Response:
+        backend = self._require_backend("sam3d", expected_role="generate")
         return await self._proxy_request(
             request=request,
             backend=backend,
-            upstream_path="/retrieve_objects",
+            upstream_path=f"/v1/sam3d/assets/{asset_id}",
         )
 
-    async def _proxy_asset_endpoint(
-        self, backend_name: str, asset_id: str, request: Request
-    ) -> StreamingResponse:
-        backend = self._require_backend(backend_name=backend_name)
-        if backend.role == "retrieve" and self._retrieve_server_enabled():
-            return await self._proxy_request(
-                request=request,
-                backend=backend,
-                upstream_path=f"/assets/{asset_id}",
-                upstream_base_url=self._retrieve_server_base_url(),
-                ensure_backend=False,
+    async def _retrieve_v1_endpoint(self, source: str, request: Request) -> Any:
+        if self._retrieval_engine is None:
+            raise HTTPException(status_code=404, detail="Retrieval is not configured")
+        self._authorize(request)
+        self._check_rate_limit(self._client_id(request))
+        try:
+            self._docker_manager.ensure_named_service_running("openclip")
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="OpenCLIP is unavailable") from exc
+        try:
+            data = await request.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON object")
+        try:
+            num_candidates = int(data.get("num_candidates", 1))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="invalid num_candidates") from exc
+        download_value = data.get("download", False)
+        if not isinstance(download_value, bool):
+            raise HTTPException(status_code=422, detail="download must be a boolean")
+        download = download_value
+        if download and num_candidates != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="download=true requires num_candidates=1",
             )
-        return await self._proxy_request(
-            request=request,
-            backend=backend,
-            upstream_path=f"/assets/{asset_id}",
+        try:
+            result = await self._retrieval_engine.retrieve(source, data)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown source: {source}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not download:
+            return JSONResponse(result)
+        results = result.get("results") or []
+        if not results:
+            raise HTTPException(status_code=404, detail="No retrieval candidates")
+        return await self._retrieval_file_response(source, results[0]["asset_id"])
+
+    async def _retrieve_asset_v1_endpoint(
+        self, source: str, asset_id: str, request: Request
+    ) -> Response:
+        if self._retrieval_engine is None:
+            raise HTTPException(status_code=404, detail="Retrieval is not configured")
+        self._authorize(request)
+        return await self._retrieval_file_response(source, asset_id)
+
+    async def _retrieval_file_response(
+        self, source: str, asset_id: str
+    ) -> Response:
+        try:
+            asset = self._retrieval_engine.package(source, asset_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Asset not found") from exc
+        return Response(
+            content=asset.path.read_bytes(),
+            media_type="application/zip",
+            headers={
+                "X-Asset-ID": asset_id,
+                "X-Asset-SHA256": asset.sha256,
+                "Content-Length": str(asset.size_bytes),
+                "Content-Disposition": f'attachment; filename="{asset_id}.zip"',
+            },
         )
 
     async def _generate_assets_endpoint(self, request: Request) -> Any:
@@ -405,21 +494,6 @@ class AssetAcquisitionApp:
                 detail=f"Backend '{backend.name}' is missing server.host/server.port",
             )
         return f"http://{host}:{port}{upstream_path}"
-
-    def _retrieve_server_enabled(self) -> bool:
-        retrieve_server = self._runtime_config().get("retrieve_server", {})
-        return bool(retrieve_server.get("enabled", False))
-
-    def _retrieve_server_base_url(self) -> str:
-        retrieve_server = self._runtime_config().get("retrieve_server", {})
-        host = retrieve_server.get("host")
-        port = retrieve_server.get("port")
-        if not host or not port:
-            raise HTTPException(
-                status_code=500,
-                detail="runtime.retrieve_server is missing host/port",
-            )
-        return f"http://{host}:{port}"
 
     def _authorize(self, request: Request) -> None:
         api_key = self._gateway_value("api_key")

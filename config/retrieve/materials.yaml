@@ -1,34 +1,17 @@
 name: materials
-type: materials_retrieval
+type: materials
 role: retrieve
-enabled: false
+enabled: true
+embedding_provider: openclip
 
-server:
-  host: 127.0.0.1
-  port: 7004
+dataset:
+  root: data/materials
+  embeddings: data/materials/embeddings
 
-docker:
-  enabled: true
-  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
-  container_name: assetserver-materials
-  command:
-    - python
-    - -m
-    - assetserver.materials_retrieval_server.standalone_server
-    - --host
-    - 0.0.0.0
-    - --port
-    - "7004"
-  ports:
-    - "7004:7004"
-  gpu: true
-  volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+search:
+  default_candidates: 1
+  max_candidates: 20
 
-params:
-  preload_retriever: true
-  materials_data_path: data/materials
-  materials_embeddings_path: data/materials/embeddings
-  materials_top_k: 5
-  clip_device: null
+delivery:
+  format: zip
+  cache_dir: .cache/assetserver/retrieve/materials

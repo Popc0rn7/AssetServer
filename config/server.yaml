@@ -10,12 +10,32 @@ gateway:
     enabled: false
     max_requests_per_minute: 60
 
+embedding_providers:
+  openclip:
+    type: openclip_http
+    base_url: ${oc.env:ASSETSERVER_OPENCLIP_URL,http://127.0.0.1:7006}
+    model: ViT-H-14-378-quickgelu
+    revision: dfn5b
+    dimension: 1024
+    timeout_s: 30
+
 docker:
   launch_backend: ${oc.env:ASSETSERVER_DOCKER_LAUNCH_BACKEND,false}
   network: ${oc.env:ASSETSERVER_DOCKER_NETWORK,null}
   startup_timeout_s: 300
   health_interval_s: 1.0
   services:
+    openclip:
+      enabled: true
+      image: ${oc.env:ASSETSERVER_OPENCLIP_IMAGE,assetserver-openclip:dev}
+      container_name: assetserver-openclip
+      ports:
+        - "7006:7006"
+      gpu: true
+      health_url: http://127.0.0.1:7006/health/ready
+      volumes:
+        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/checkpoints/open_clip:/models:ro"
+        - "openclip-cache:/var/cache/openclip"
     postprocess:
       enabled: true
       image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
@@ -53,12 +73,6 @@ runtime:
     port: 7100
     collision_method: coacd
     timeout_s: 300
-  retrieve_server:
-    enabled: false
-    host: 127.0.0.1
-    port: 7005
-    preload: true
-    clip_device: null
 
 # Replaceable tool declarations are loaded from these directories. Add a new YAML
 # file under config/generate or config/retrieve to make a backend discoverable

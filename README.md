@@ -10,7 +10,7 @@ validation loops, or simulation policy.
 ## What It Serves
 
 - Image-conditioned 3D generation through SAM3D and Hunyuan3D.
-- Text retrieval from HSSD and Objaverse/ObjectThor datasets.
+- Text retrieval from Materials and Articulated datasets through the Gateway.
 - Lightweight in-process mesh handling under `assetserver.postprocess`.
 - Heavy postprocessing under `assetserver.postprocess_server`, currently
   including mandatory convex decomposition for collision geometry.
@@ -28,7 +28,47 @@ Use Python 3.11.
 uv sync --group generate --group retrieve
 ```
 
-SAM3D requires its external repositories and checkpoints:
+SAM3D is delivered as a model-free service image plus a complete offline model
+bundle. The bundle includes SAM3, SAM 3D Objects, MoGe, and DINOv2 weights; files
+under runtime caches are never treated as required models.
+
+The normal Docker workflow has three top-level shell commands:
+
+```bash
+scripts/download_sam3d_ckpt.sh
+scripts/build_sam3d_docker.sh
+scripts/run_sam3d_docker.sh
+```
+
+The defaults use the existing `checkpoints/` layout, image
+`assetserver-sam3d:dev`, GPU 0, and `127.0.0.1:7000`. Run
+`scripts/download_sam3d_ckpt.sh --verify` to validate `model-manifest.json`
+without downloading anything. The manifest includes the exact MoGe and DINOv2
+weight files currently stored under the historical `hf-cache` and `torch-cache`
+directories. The container itself remains offline; clearing the separate
+`sam3d-cache` Docker volume rebuilds runtime cache from the mounted checkpoints.
+
+OpenCLIP is a separate GPU embedding service shared by retrieval sources. Its
+weights are downloaded independently and its image reuses the CUDA, Python, uv,
+and Torch layers from the SAM3D serving Dockerfile:
+
+```bash
+scripts/download_openclip_ckpt.sh
+scripts/build_openclip_docker.sh
+scripts/run_openclip_docker.sh
+```
+
+The explicit backend API is:
+
+```text
+POST /v1/sam3d/generations
+GET  /v1/sam3d/assets/{asset_id}
+GET  /health/live
+GET  /health/ready
+```
+
+SAM3D requires its external repositories and checkpoints for non-Docker legacy
+development:
 
 ```bash
 bash scripts/install_sam3d.sh
@@ -37,7 +77,7 @@ bash scripts/install_sam3d.sh
 To download or resume only the checkpoints, use:
 
 ```bash
-bash scripts/download_sam3d_checkpoints.sh
+bash scripts/download_sam3d_ckpt.sh
 ```
 
 By default checkpoints are stored in `checkpoints/`. Use
@@ -67,8 +107,9 @@ The main config is `config/server.yaml`. Backend declarations are discovered fro
 - `config/generate/*.yaml`
 - `config/retrieve/*.yaml`
 
-SAM3D, Hunyuan3D, and the postprocess server are enabled by default. HSSD and
-Objaverse are disabled by default because they require local dataset downloads.
+SAM3D, Hunyuan3D, Materials, Articulated, and the postprocess server are
+enabled by default. Materials and Articulated datasets must be present under
+`data/` on the Gateway host; they are exposed only through HTTP ZIP downloads.
 
 Enable retrieval backends with an override in `config/server.yaml`:
 
@@ -155,19 +196,27 @@ Start the gateway:
 uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --port 7010
 ```
 
-It exposes:
+It exposes operational endpoints plus the public APIs in `API.md`:
 
 - `GET /health`
 - `GET /tools`
 - `GET /backends`
 - `GET /history`
-- `POST /generate/{backend}`
-- `POST /retrieve/{backend}`
-- `GET /assets/{backend}/{asset_id}`
+- `POST /v1/generate/sam3d`
+- `POST /v1/retrieve/materials`
+- `POST /v1/retrieve/articulated`
+- `GET /v1/assets/{source}/{asset_id}`
 
-The gateway does not perform model generation, retrieval, or collision
-decomposition. It forwards requests to enabled backend servers and records
-gateway-level state.
+The gateway routes model generation, coordinates lightweight local retrieval,
+packages retrieved dataset assets, and records request state. OpenCLIP inference
+remains a separate backend service.
+
+Run the real retrieval smoke test only after OpenCLIP, Gateway, and local
+datasets are ready:
+
+```bash
+.venv/bin/python tests/smoke/retrieve_gateway.py --download
+```
 
 ## Gateway Docker Backend Launch
 
@@ -181,7 +230,7 @@ Build backend images as needed:
 
 ```bash
 bash scripts/build_sam3d_image.sh --sudo
-bash scripts/build_hunyuan3d_image.sh --sudo
+scripts/build_openclip_docker.sh --sudo
 ```
 
 Run the gateway on the host without automatic Docker launch:
@@ -191,27 +240,27 @@ ASSETSERVER_DOCKER_LAUNCH_BACKEND=false \
 uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --port 7010
 ```
 
-Start backend containers manually from local YAML config:
+Start model containers manually:
 
 ```bash
 bash scripts/run_sam3d_docker.sh
-bash scripts/run_hunyuan3d_docker.sh
+scripts/run_openclip_docker.sh
 ```
 
 If automatic launch is enabled, the gateway checks the requested backend before
 proxying:
 
-1. Start configured dependencies, currently `postprocess`.
-2. Start the requested backend container if it is missing or stopped.
-3. Wait for the backend `/health` endpoint.
-4. Forward the original HTTP request.
+1. Start configured dependencies, including OpenCLIP for retrieval.
+2. Start the requested model container if it is missing or stopped.
+3. Wait for the model `/health` endpoint.
+4. Execute or forward the original HTTP request.
 
 The gateway never accepts image names or commands from request bodies. Docker
 container settings come only from local YAML config:
 
 - global services in `config/server.yaml`
 - backend containers in `config/generate/*.yaml`
-- backend containers in `config/retrieve/*.yaml`
+- retrieval source definitions in `config/retrieve/*.yaml`
 
 Useful status endpoint:
 
@@ -289,9 +338,9 @@ curl -N http://127.0.0.1:7010/generate/hunyuan3d \
   -H 'content-type: application/json' \
   -d '[{"image_path":"/tmp/object.png","output_dir":"outputs/hunyuan3d_example","prompt":"red cup","backend":"hunyuan3d"}]'
 
-curl -N http://127.0.0.1:7010/retrieve/hssd \
+curl http://127.0.0.1:7010/v1/retrieve/materials \
   -H 'content-type: application/json' \
-  -d '[{"object_description":"modern chair","object_type":"FURNITURE","output_dir":"outputs/hssd_example"}]'
+  -d '{"description":"warm hardwood floor","num_candidates":3}'
 ```
 
 ## HTTP API
@@ -299,9 +348,9 @@ curl -N http://127.0.0.1:7010/retrieve/hssd \
 Gateway:
 
 - `POST /generate/{backend}` forwards to the backend's `POST /generate_geometries`.
-- `POST /retrieve/{backend}` forwards to the backend's `POST /retrieve_objects`.
-- `GET /assets/{backend}/{asset_id}` forwards to the backend's
-  `GET /assets/{asset_id}`.
+- `POST /v1/retrieve/materials` and `POST /v1/retrieve/articulated` return
+  Gateway-owned candidate metadata.
+- `GET /v1/assets/{source}/{asset_id}` returns a packaged ZIP asset.
 - `GET /history` returns recent gateway requests with backend, status, duration,
   and error information.
 
@@ -313,13 +362,8 @@ Backend generation:
 - Response: NDJSON stream. Successful rows include `geometry_path`, `asset_id`,
   `download_url`, and `collision`.
 
-Backend retrieval:
-
-- `POST /retrieve_objects`
-- Body: list of requests with `object_description`, `object_type`, `output_dir`,
-  optional `desired_dimensions`, `scene_id`, `num_candidates`.
-- Response: NDJSON stream. Result objects include `mesh_path`, `asset_id`,
-  `download_url`, and `collision`.
+Retrieval requests never accept `output_dir` or return container filesystem
+paths. The full public contract is maintained in `API.md`.
 
 Collision metadata:
 

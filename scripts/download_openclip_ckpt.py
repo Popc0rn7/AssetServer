@@ -8,6 +8,7 @@ so the runtime text encoder must use the same model.
 from __future__ import annotations
 
 import os
+import shutil
 
 from pathlib import Path
 
@@ -42,19 +43,10 @@ def download_openclip(cache_dir: Path, force_download: bool = False) -> Path:
     path = hf_hub_download(
         repo_id=HF_REPO_ID,
         filename=HF_FILENAME,
-        cache_dir=str(cache_dir),
+        cache_dir=str(cache_dir / "hf-cache"),
         force_download=force_download,
     )
     return Path(path)
-
-
-def verify_assetserver_load(cache_dir: Path) -> None:
-    os.environ["ASSETSERVER_OPENCLIP_CACHE_DIR"] = str(cache_dir)
-
-    from assetserver.clip_embeddings import get_text_embedding
-
-    embedding = get_text_embedding("wooden wardrobe cabinet", device="cpu")
-    print(f"OpenCLIP text embedding: shape={embedding.shape}, dtype={embedding.dtype}")
 
 
 def main() -> int:
@@ -79,14 +71,13 @@ def main() -> int:
             "retry with the official HuggingFace endpoint, for example: "
             "unset HF_ENDPOINT; export HF_HUB_DISABLE_XET=1"
         )
-    print(f"Downloaded OpenCLIP weights: {checkpoint_path}")
+    bundle_checkpoint = cache_dir / HF_FILENAME
+    if checkpoint_path.resolve() != bundle_checkpoint.resolve():
+        shutil.copy2(checkpoint_path, bundle_checkpoint)
+    from assetserver.openclip_server.model_bundle import create_manifest
 
-    print("Verifying AssetServer can load OpenCLIP from this cache...")
-    verify_assetserver_load(cache_dir)
-
-    print()
-    print("Use this environment variable for retrieval backend runs:")
-    print(f"  export ASSETSERVER_OPENCLIP_CACHE_DIR={cache_dir}")
+    create_manifest(cache_dir, revision=PRETRAINED)
+    print(f"OpenCLIP offline bundle ready: {cache_dir}")
     return 0
 
 

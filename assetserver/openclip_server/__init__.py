@@ -1,0 +1,1 @@
+"""Standalone OpenCLIP embedding service."""

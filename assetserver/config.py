@@ -35,13 +35,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "collision_method": "coacd",
             "timeout_s": 300,
         },
-        "retrieve_server": {
-            "enabled": False,
-            "host": "127.0.0.1",
-            "port": 7005,
-            "preload": True,
-            "clip_device": None,
-        },
     },
     "docker": {
         "launch_backend": False,

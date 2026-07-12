@@ -80,7 +80,7 @@ class MaterialsConfig:
         """Create config from Hydra/OmegaConf structure.
 
         Args:
-            cfg: Materials config subtree (cfg.materials_retrieval_server).
+            cfg: Materials source configuration.
 
         Returns:
             MaterialsConfig instance.

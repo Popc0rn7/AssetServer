@@ -1,34 +1,22 @@
 name: articulated
-type: articulated_retrieval
+type: articulated
 role: retrieve
-enabled: false
+enabled: true
+embedding_provider: openclip
 
-server:
-  host: 127.0.0.1
-  port: 7003
+sources:
+  artvip:
+    enabled: true
+    root: data/artvip_sdf
+    embeddings: data/artvip_sdf/embeddings
 
-docker:
-  enabled: true
-  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
-  container_name: assetserver-articulated
-  command:
-    - python
-    - -m
-    - assetserver.articulated_retrieval_server.standalone_server
-    - --host
-    - 0.0.0.0
-    - --port
-    - "7003"
-  ports:
-    - "7003:7003"
-  gpu: true
-  volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+search:
+  default_candidates: 1
+  max_candidates: 20
+  clip_pool_size: 5
+  semantic_weight: 1.0
+  bounding_box_weight: 1.0
 
-params:
-  preload_retriever: true
-  artvip_data_path: data/artvip_sdf
-  artvip_embeddings_path: data/artvip_sdf/embeddings
-  articulated_top_k: 5
-  clip_device: null
+delivery:
+  format: zip
+  cache_dir: .cache/assetserver/retrieve/articulated
