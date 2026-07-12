@@ -78,6 +78,10 @@ lines_between_types = 1
 combine_as_imports = true
 known_first_party = ['assetserver']
 
+[tool.ruff.lint.per-file-ignores]
+"assetserver/geometry_generation_server/geometry_generation.py" = ["E402"]
+"assetserver/geometry_generation_server/sam3d_pipeline_manager.py" = ["E402"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

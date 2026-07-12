@@ -159,7 +159,6 @@ class DockerBackendManager:
         if not image and not container_name:
             raise RuntimeError(f"Docker service '{name}' is missing image/container_name")
 
-        client = self._docker_client()
         container = self._get_container(container_name)
 
         if container is None:
