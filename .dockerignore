@@ -1,0 +1,12 @@
+.git
+.venv
+.pytest_cache
+**/__pycache__
+checkpoints
+models
+outputs
+data
+sessions
+var
+submodules/scenesmith
+.cache

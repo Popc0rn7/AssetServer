@@ -174,6 +174,11 @@ class SAM3DPipelineManager:
             if key.endswith(("_path", "_ckpt_path", "_config_path")):
                 if config[key] and not Path(config[key]).is_absolute():
                     config[key] = str(checkpoint_dir / config[key])
+        # Runtime services materialize every required weight in the offline model
+        # bundle.  Never let Hydra resolve MoGe through Hugging Face during startup.
+        offline_moge = os.environ.get("SAM3D_MOGE_MODEL_PATH")
+        if offline_moge and "depth_model" in config:
+            config.depth_model.model.pretrained_model_name_or_path = offline_moge
         console_logger.debug("Config paths updated")
 
         # Use Hydra to instantiate the entire pipeline with all nested configs.

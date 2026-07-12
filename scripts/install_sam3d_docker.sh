@@ -11,6 +11,7 @@ set -euo pipefail
 
 SAM3D_OBJECTS_COMMIT="${SAM3D_OBJECTS_COMMIT:-81a82373a3a7f4cbb00bd5b32aaf6b4d0f659ddd}"
 SAM3_COMMIT="${SAM3_COMMIT:-11dec2936de97f2857c1f76b66d982d5a001155d}"
+DINOV2_COMMIT="${DINOV2_COMMIT:-7764ea0f912e53c92e82eb78a2a1631e92725fc8}"
 GITHUB_URL_PREFIX="${GITHUB_URL_PREFIX:-https://github.com/}"
 GITHUB_URL_PREFIX="${GITHUB_URL_PREFIX%/}/"
 PYPI_INDEX_URL="${PYPI_INDEX_URL:-}"
@@ -27,7 +28,10 @@ usage() {
 Usage: scripts/install_sam3d_docker.sh [--stage N|NAME]
 
 Stages:
-  1, repos       Clone and pin SAM3 / SAM 3D Objects repositories.
+  1, repos       Fetch both SAM3 / SAM 3D Objects repositories.
+  repos-objects  Fetch only SAM 3D Objects.
+  repos-sam3     Fetch only SAM3.
+  repos-dinov2   Fetch only DINOv2.
   2, sam3        Install SAM3 editable package and torch_generic_nms.
   3, core        Install SAM 3D Objects core requirements.
   4, gsplat      Install gsplat.
@@ -75,6 +79,29 @@ github_url() {
     printf "%s%s" "$GITHUB_URL_PREFIX" "$path"
 }
 
+fetch_repo() {
+    local destination="$1"
+    local repository="$2"
+    local revision="$3"
+    local attempt
+
+    for attempt in 1 2 3; do
+        rm -rf "$destination"
+        mkdir -p "$destination"
+        (
+            cd "$destination"
+            git init --quiet
+            git remote add origin "$(github_url "$repository")"
+            GIT_LFS_SKIP_SMUDGE=1 git -c http.version=HTTP/1.1 fetch --depth 1 origin "$revision"
+            git checkout --detach FETCH_HEAD
+        ) && return 0
+        echo "Git fetch failed for ${repository} (attempt ${attempt}/3)" >&2
+        sleep $((attempt * 5))
+    done
+    echo "Failed to fetch ${repository} at ${revision}" >&2
+    return 1
+}
+
 uv_pip_install() {
     local attempt
     local args=(uv pip install)
@@ -106,39 +133,38 @@ print_header() {
     echo "Using UV_HTTP_TIMEOUT: ${UV_HTTP_TIMEOUT}"
 }
 
-run_stage_1() {
+run_stage_1_objects() {
     echo ""
-    echo "Stage 1: Cloning repositories..."
-
+    echo "Stage 1a: Fetching SAM 3D Objects..."
     mkdir -p external
-    cd external
+    fetch_repo external/sam-3d-objects facebookresearch/sam-3d-objects.git \
+        "$SAM3D_OBJECTS_COMMIT"
+}
 
-    if [ ! -d "sam-3d-objects" ]; then
-        git clone "$(github_url facebookresearch/sam-3d-objects.git)"
-        echo "Cloned sam-3d-objects"
-    else
-        echo "sam-3d-objects already exists"
-    fi
-    echo "Checking out SAM 3D Objects commit: ${SAM3D_OBJECTS_COMMIT}"
-    git -C sam-3d-objects fetch origin
-    git -C sam-3d-objects checkout --detach "${SAM3D_OBJECTS_COMMIT}"
+run_stage_1_sam3() {
+    echo ""
+    echo "Stage 1b: Fetching SAM3..."
+    mkdir -p external
+    fetch_repo external/SAM3 facebookresearch/sam3.git "$SAM3_COMMIT"
+}
 
-    if [ ! -d "SAM3" ]; then
-        git clone "$(github_url facebookresearch/sam3.git)" SAM3
-        echo "Cloned SAM3"
-    else
-        echo "SAM3 already exists"
-    fi
-    echo "Checking out SAM3 commit: ${SAM3_COMMIT}"
-    git -C SAM3 fetch origin
-    git -C SAM3 checkout --detach "${SAM3_COMMIT}"
+run_stage_1_dinov2() {
+    echo ""
+    echo "Stage 1c: Fetching DINOv2..."
+    fetch_repo /opt/dinov2 facebookresearch/dinov2.git "$DINOV2_COMMIT"
+    rm -rf /opt/dinov2/.git
+}
+
+run_stage_1() {
+    run_stage_1_objects
+    run_stage_1_sam3
 }
 
 run_stage_2() {
     echo ""
     echo "Stage 2: Installing SAM3..."
     cd external/SAM3
-    uv_pip_install -e ".[notebooks]"
+    uv_pip_install .
     echo "SAM3 installed"
 
     echo ""
@@ -166,7 +192,7 @@ run_stage_5() {
     echo ""
     echo "Stage 5: Installing nvdiffrast..."
     uv_pip_install --no-build-isolation \
-        "git+$(github_url NVlabs/nvdiffrast.git)"
+        "git+$(github_url NVlabs/nvdiffrast.git)@${NVDIFFRAST_REVISION:-v0.4.0}"
 
     echo ""
     echo "Pre-compiling nvdiffrast CUDA extensions..."
@@ -218,22 +244,25 @@ run_stage_7() {
     echo ""
     echo "Stage 7: Installing pytorch3d from source..."
     uv_pip_install --no-build-isolation \
-        "git+$(github_url facebookresearch/pytorch3d.git)"
+        "git+$(github_url facebookresearch/pytorch3d.git)@${PYTORCH3D_REVISION:-33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba}"
 }
 
 run_stage_8() {
     echo ""
     echo "Stage 8: Installing inference dependencies..."
-    uv_pip_install seaborn==0.13.2 gradio==5.49.0 imageio utils3d
+    uv_pip_install imageio utils3d
 
     echo ""
     echo "Installing MoGe depth model..."
-    uv_pip_install "git+$(github_url microsoft/MoGe.git)@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b"
+    uv_pip_install "git+$(github_url microsoft/MoGe.git)@${MOGE_REVISION:-a8c37341bc0325ca99b9d57981cc3bb2bd3e255b}"
 }
 
 run_selected_stage() {
     case "$STAGE" in
         1|repos) run_stage_1 ;;
+        repos-objects) run_stage_1_objects ;;
+        repos-sam3) run_stage_1_sam3 ;;
+        repos-dinov2) run_stage_1_dinov2 ;;
         2|sam3) run_stage_2 ;;
         3|core) run_stage_3 ;;
         4|gsplat) run_stage_4 ;;

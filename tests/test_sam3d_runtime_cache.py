@@ -1,0 +1,79 @@
+import json
+
+from types import SimpleNamespace
+
+import yaml
+
+from assetserver.sam3d_server.runtime import (
+    SAM3DRuntime,
+    ensure_runtime_cache_dirs,
+    seed_dinov2_cache,
+)
+
+
+def test_runtime_cache_directories_are_created_for_an_existing_volume(tmp_path):
+    cache_root = tmp_path / "existing-volume"
+    cache_root.mkdir()
+
+    ensure_runtime_cache_dirs(cache_root)
+
+    assert (cache_root / "xdg").is_dir()
+    assert (cache_root / "config").is_dir()
+    assert (cache_root / "matplotlib").is_dir()
+    assert (cache_root / "hf").is_dir()
+    assert (cache_root / "torch").is_dir()
+    assert (cache_root / "torch-extensions").is_dir()
+
+
+def test_seed_dinov2_cache_rebuilds_from_image_code_and_model_weight(tmp_path):
+    source = tmp_path / "image" / "dinov2"
+    source.mkdir(parents=True)
+    (source / "hubconf.py").write_text("# local code\n")
+    weight = tmp_path / "checkpoints" / "dinov2.pth"
+    weight.parent.mkdir()
+    weight.write_bytes(b"weights")
+    torch_home = tmp_path / "cache" / "torch"
+
+    seed_dinov2_cache(
+        SimpleNamespace(dino_weights=weight),
+        source_root=source,
+        torch_home=torch_home,
+    )
+
+    assert (torch_home / "hub/facebookresearch_dinov2_main/hubconf.py").is_file()
+    cached_weight = torch_home / "hub/checkpoints/dinov2_vitl14_reg4_pretrain.pth"
+    assert cached_weight.read_bytes() == b"weights"
+
+
+def test_runtime_passes_moge_checkpoint_file_not_snapshot_directory(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "models"
+    root.mkdir()
+    sam3 = root / "sam3.pt"
+    pipeline = root / "pipeline.yaml"
+    moge = root / "hf-cache/models--Ruicheng--moge-vitl/snapshots/rev/model.pt"
+    dino = root / "torch-cache/hub/checkpoints/dinov2_vitl14_reg4_pretrain.pth"
+    for path in (sam3, moge, dino):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"model")
+    pipeline.write_text(yaml.safe_dump({}))
+
+    import assetserver.sam3d_server.model_bundle as model_bundle
+
+    manifest = model_bundle.create_manifest(root, "test")
+    assert json.loads((root / "model-manifest.json").read_text()) == manifest
+    dinov2_source = tmp_path / "dinov2-source"
+    dinov2_source.mkdir()
+    (dinov2_source / "hubconf.py").write_text("# local")
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("SAM3D_DINOV2_SOURCE", str(dinov2_source))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache / "xdg"))
+    monkeypatch.setenv("HF_HOME", str(cache / "hf"))
+    monkeypatch.setenv("TORCH_HOME", str(cache / "torch"))
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(cache / "torch-extensions"))
+
+    runtime = SAM3DRuntime(root)
+
+    assert runtime.bundle.moge_model == moge.resolve()
+    assert __import__("os").environ["SAM3D_MOGE_MODEL_PATH"] == str(moge.resolve())

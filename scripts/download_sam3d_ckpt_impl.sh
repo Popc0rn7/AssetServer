@@ -3,17 +3,17 @@
 # Download SAM3D checkpoints into the layout expected by AssetServer.
 #
 # Usage:
-#   scripts/download_sam3d_checkpoints.sh
-#   scripts/download_sam3d_checkpoints.sh --checkpoint-dir /mnt/data/checkpoints
+#   scripts/download_sam3d_ckpt_impl.sh
+#   scripts/download_sam3d_ckpt_impl.sh --checkpoint-dir /mnt/data/checkpoints
 #
 # Optional:
-#   HF_ENDPOINT=https://hf-mirror.com scripts/download_sam3d_checkpoints.sh
+#   HF_ENDPOINT=https://hf-mirror.com scripts/download_sam3d_ckpt_impl.sh
 
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/download_sam3d_checkpoints.sh [--checkpoint-dir PATH]
+Usage: scripts/download_sam3d_ckpt_impl.sh [--checkpoint-dir PATH]
 
 Downloads SAM3D checkpoints into the layout expected by AssetServer.
 
@@ -80,6 +80,7 @@ if [ -f "$CHECKPOINT_DIR/sam3.pt" ]; then
 else
     echo "Downloading SAM3 checkpoint..."
     "${HF_CLI[@]}" facebook/sam3 sam3.pt \
+        --revision "${SAM3_MODEL_REVISION:-main}" \
         --local-dir "$CHECKPOINT_DIR"
     echo "✓ Downloaded sam3.pt"
 fi
@@ -109,6 +110,7 @@ else
     echo "Downloading SAM 3D Objects checkpoints..."
     "${HF_CLI[@]}" facebook/sam-3d-objects \
         --repo-type model \
+        --revision "${SAM3D_MODEL_REVISION:-main}" \
         --local-dir "$TMP_DIR" \
         --include "checkpoints/*"
 
