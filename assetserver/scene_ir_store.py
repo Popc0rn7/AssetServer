@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from assetserver.asset_store import AssetStore, AssetStoreError
+from assetserver.asset_store import ContentAddressedAssetStore, AssetStoreError
 from assetserver.scene_ir import SceneIR, dump_scene_yaml, load_scene_yaml
 
 
@@ -36,7 +36,9 @@ class IRSceneRevision:
 
 
 class IRSceneStore:
-    def __init__(self, root: str | Path, asset_store: AssetStore) -> None:
+    def __init__(
+        self, root: str | Path, asset_store: ContentAddressedAssetStore
+    ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.asset_store = asset_store
@@ -92,7 +94,11 @@ class IRSceneStore:
     def _validate_assets(self, scene: SceneIR) -> None:
         for asset_ref in sorted(scene.asset_refs()):
             try:
-                self.asset_store.resolve(asset_ref)
+                stored = self.asset_store.resolve(asset_ref)
+                if stored.manifest.get("kind", "object") != "object":
+                    raise AssetStoreError(
+                        f"Scene IR object cannot reference {stored.manifest.get('kind')} asset: {asset_ref}"
+                    )
             except AssetStoreError as exc:
                 raise IRSceneAssetError(str(exc)) from exc
 

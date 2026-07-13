@@ -11,6 +11,55 @@ import requests
 import trimesh
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS
+from assetserver.asset_store import ContentAddressedAssetStore, StoredAsset
+
+
+def publish_collision_asset(
+    store: ContentAddressedAssetStore,
+    asset_ref: str,
+    collision_files: dict[str, bytes],
+    *,
+    method: str = "coacd",
+    operation_version: str = "1",
+) -> StoredAsset:
+    """Publish collision output as an immutable child without touching its parent."""
+    parent = store.resolve(asset_ref)
+    files = {
+        record["path"]: store.file_path(parent.root, record["path"]).read_bytes()
+        for record in parent.manifest["files"]
+    }
+    normalized_collision = {
+        f"collision/{Path(name).name}": content
+        for name, content in collision_files.items()
+    }
+    files.update(normalized_collision)
+    return store.ingest(
+        files,
+        visual=parent.manifest["visual"],
+        simulation=parent.manifest.get("simulation"),
+        collision=[
+            {"entrypoint": name, "method": method}
+            for name in sorted(normalized_collision)
+        ],
+        bounds=parent.manifest.get("bounds"),
+        joints=parent.manifest.get("joints"),
+        support_surfaces=parent.manifest.get("support_surfaces"),
+        metadata=parent.manifest.get("metadata"),
+        source={
+            "type": "derived",
+            "name": "collision",
+            "resource_id": parent.digest,
+        },
+        source_frame=parent.manifest["source"]["frame"],
+        license=parent.manifest.get("license"),
+        tool_versions={"collision": operation_version},
+        preview=parent.manifest.get("preview"),
+        parent={
+            "asset_ref": asset_ref,
+            "operation": method,
+            "operation_version": operation_version,
+        },
+    )
 
 
 def generate_collision_artifacts(
