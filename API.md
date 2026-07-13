@@ -282,6 +282,115 @@ source dataset.
 | `503` | `embedding_provider_unavailable` | OpenCLIP is unavailable or not ready. | Retry with backoff. |
 | `500` | `generation_failed` | Generation failed before an asset was created. | Inspect `retryable`. |
 
+## Static SDF scenes
+
+Enable the scene API with `runtime.scene_server.enabled=true`. Version 1 stores a
+static SDF scene package, lets one agent replace the SDF through immutable
+revisions, obtains synchronous previews from an external renderer, and downloads
+any revision as a complete package.
+
+The initial ZIP must contain exactly one `scene.sdf` at its root. Referenced
+meshes and textures use relative paths such as `meshes/chair.glb`. Absolute paths,
+`file://` and network URIs, symbolic links, and paths containing `..` are rejected.
+Version 1 supports static `model`, `link`, `visual`, `pose`, and mesh content; it
+does not define articulated joint state or animation behavior.
+
+### Create a scene
+
+```http
+POST /v1/scenes
+Content-Type: multipart/form-data
+```
+
+The multipart field is `package` and must contain a ZIP archive.
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:7010/v1/scenes \
+  -F 'package=@scene.zip;type=application/zip'
+```
+
+Successful response (`201 Created`):
+
+```json
+{
+  "scene_id": "5d4992dc-6957-43d6-a43f-76f36db50c66",
+  "revision": 1,
+  "sdf_url": "/v1/scenes/5d4992dc-6957-43d6-a43f-76f36db50c66/sdf",
+  "render_url": "/v1/scenes/5d4992dc-6957-43d6-a43f-76f36db50c66/render"
+}
+```
+
+### Read or update the SDF
+
+```http
+GET /v1/scenes/{scene_id}/sdf
+GET /v1/scenes/{scene_id}/sdf?revision=1
+```
+
+The response is `application/xml`. `X-Scene-Revision` identifies the returned
+revision and `ETag` contains the SDF SHA-256 digest.
+
+Create a new immutable revision by sending the complete SDF document:
+
+```http
+PUT /v1/scenes/{scene_id}/sdf
+Content-Type: application/xml
+X-Base-Revision: 1
+
+<sdf version="1.10">...</sdf>
+```
+
+`X-Base-Revision` must be the latest revision. A stale write returns
+`409 scene_revision_conflict`. Referenced assets must already exist in the
+original scene package; version 1 has no separate asset mutation endpoint.
+
+### Render a preview
+
+```http
+POST /v1/scenes/{scene_id}/render
+Content-Type: application/json
+```
+
+```json
+{
+  "revision": 2,
+  "views": ["top", "front", "side", "perspective"],
+  "width": 512,
+  "height": 512,
+  "format": "webp"
+}
+```
+
+All fields are optional. The revision defaults to latest and the remaining
+values default to the example above. Rendering is synchronous. A successful
+response is an `application/zip` containing one image named after each requested
+view. The gateway forwards the complete scene package to the configured renderer;
+see [the internal renderer contract](docs/RENDERER_API.md).
+
+### Download a final scene package
+
+```http
+GET /v1/scenes/{scene_id}/final
+GET /v1/scenes/{scene_id}/final?revision=2
+```
+
+The response ZIP contains `scene.sdf` for the selected revision plus the shared
+asset tree. The response includes `X-Scene-ID`, `X-Scene-Revision`, and
+`X-Scene-SHA256`. There is no separate publish/finalize state in version 1.
+
+Scene API errors add the following codes to the common error envelope:
+
+| Status | Error | Meaning |
+| --- | --- | --- |
+| `404` | `scene_not_found` | Scene or selected revision does not exist. |
+| `409` | `scene_revision_conflict` | Base revision is stale. |
+| `415` | `unsupported_scene_media_type` | Initial upload is not a ZIP. |
+| `422` | `invalid_scene_package` | ZIP, SDF XML, path, or asset reference is invalid. |
+| `422` | `invalid_sdf` | Updated SDF XML or an asset reference is invalid. |
+| `502` | `render_failed` | Renderer rejected or returned an invalid result. |
+| `503` | `render_backend_unavailable` | Renderer is absent or unreachable. |
+| `504` | `render_timed_out` | Synchronous rendering exceeded its timeout. |
+
 An error response must preserve the backend status and structured detail when
 possible. The gateway must not replace a backend error with a generic JSON parse
 error.
