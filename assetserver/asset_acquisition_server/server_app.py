@@ -3,11 +3,13 @@ import os
 import time
 import uuid
 import hashlib
+import json
 
 from asyncio import to_thread
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 from typing import Literal
 
@@ -19,13 +21,22 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
+from assetserver.asset_store import AssetStore
 from assetserver.config import BackendSpec, backend_specs, enabled_backend_specs
+from assetserver.jobs import JobNotFoundError, SQLiteJobStore
 from assetserver.scene_renderer import SceneRendererClient, SceneRendererError
 from assetserver.scenes import (
     SceneConflictError,
     SceneNotFoundError,
     ScenePackageError,
     SceneStore,
+)
+from assetserver.scene_ir import SceneIR, SceneIRValidationError
+from assetserver.scene_ir_store import (
+    IRSceneAssetError,
+    IRSceneConflictError,
+    IRSceneNotFoundError,
+    IRSceneStore,
 )
 
 from .dataclasses import (
@@ -98,6 +109,8 @@ class AssetAcquisitionApp:
         retrieval_engine: Any | None = None,
         scene_store: SceneStore | None = None,
         scene_renderer: Any | None = None,
+        ir_scene_store: IRSceneStore | None = None,
+        job_store: SQLiteJobStore | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
@@ -124,6 +137,18 @@ class AssetAcquisitionApp:
                 )
         self._scene_store = scene_store
         self._scene_renderer = scene_renderer
+        data_root = Path(scene_config.get("data_root", "data"))
+        output_root = Path(scene_config.get("output_root", "outputs"))
+        self._scene_data_root = data_root
+        self._scene_output_root = output_root
+        if ir_scene_store is None and scene_config.get("ir_enabled", False):
+            ir_scene_store = IRSceneStore(
+                data_root / "scenes", AssetStore(data_root / "assets")
+            )
+        self._ir_scene_store = ir_scene_store
+        if job_store is None and ir_scene_store is not None and config is not None:
+            job_store = SQLiteJobStore(data_root / "jobs" / "jobs.sqlite3")
+        self._job_store = job_store
         self._docker_manager = DockerBackendManager(config)
         self._history: deque[GatewayHistoryEntry] = deque(
             maxlen=self._gateway_int("history_max_entries", 500)
@@ -194,6 +219,54 @@ class AssetAcquisitionApp:
                 self._final_scene_endpoint,
                 methods=["GET"],
             )
+        if self._ir_scene_store is not None:
+            self.app.add_api_route(
+                "/v2/scene-schema", self._ir_scene_schema_endpoint, methods=["GET"]
+            )
+            self.app.add_api_route(
+                "/v2/scenes", self._create_ir_scene_endpoint, methods=["POST"]
+            )
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}", self._get_ir_scene_endpoint, methods=["GET"]
+            )
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}", self._update_ir_scene_endpoint, methods=["PUT"]
+            )
+        if self._ir_scene_store is not None and self._job_store is not None:
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}/observe",
+                self._submit_observe_job_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}/validate",
+                self._submit_validate_job_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}/exports",
+                self._submit_export_job_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
+                "/v2/jobs/{job_id}", self._get_job_endpoint, methods=["GET"]
+            )
+            self.app.add_api_route(
+                "/v2/jobs/{job_id}/cancel", self._cancel_job_endpoint, methods=["POST"]
+            )
+            self.app.add_api_route(
+                "/v2/observations/{observation_id}",
+                self._get_observation_endpoint,
+                methods=["GET"],
+            )
+            self.app.add_api_route(
+                "/v2/observations/{observation_id}/views/{view}",
+                self._get_observation_view_endpoint,
+                methods=["GET"],
+            )
+            self.app.add_api_route(
+                "/v2/exports/{export_id}", self._get_export_endpoint, methods=["GET"]
+            )
 
     def _health_endpoint(self) -> dict[str, Any]:
         return {
@@ -208,6 +281,273 @@ class AssetAcquisitionApp:
             },
         }
 
+    async def _create_ir_scene_endpoint(self, request: Request) -> JSONResponse:
+        if request.headers.get("content-type", "").split(";", 1)[0] not in {
+            "application/yaml",
+            "application/x-yaml",
+            "text/yaml",
+        }:
+            return self._scene_error(
+                415,
+                "unsupported_scene_media_type",
+                "Scene IR requires application/yaml",
+            )
+        try:
+            info = self._ir_scene_store.create(await request.body())
+        except (SceneIRValidationError, IRSceneAssetError) as exc:
+            return self._scene_error(422, "invalid_scene_ir", str(exc))
+        return JSONResponse(
+            {
+                "scene_id": info.scene_id,
+                "revision": info.revision,
+                "sha256": info.sha256,
+                "scene_url": f"/v2/scenes/{info.scene_id}",
+            },
+            status_code=201,
+        )
+
+    @staticmethod
+    def _ir_scene_schema_endpoint() -> dict[str, Any]:
+        return SceneIR.model_json_schema()
+
+    async def _get_ir_scene_endpoint(
+        self, scene_id: str, revision: int | None = Query(default=None, ge=1)
+    ) -> Response:
+        try:
+            info = self._ir_scene_store.revision(scene_id, revision)
+            content = self._ir_scene_store.read(scene_id, info.revision)
+        except IRSceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        return Response(
+            content,
+            media_type="application/yaml",
+            headers={
+                "X-Scene-ID": scene_id,
+                "X-Scene-Revision": str(info.revision),
+                "ETag": f'"{info.sha256}"',
+            },
+        )
+
+    async def _update_ir_scene_endpoint(
+        self,
+        scene_id: str,
+        request: Request,
+        x_base_revision: int = Header(alias="X-Base-Revision", ge=1),
+    ) -> JSONResponse:
+        if request.headers.get("content-type", "").split(";", 1)[0] not in {
+            "application/yaml",
+            "application/x-yaml",
+            "text/yaml",
+        }:
+            return self._scene_error(
+                415,
+                "unsupported_scene_media_type",
+                "Scene IR requires application/yaml",
+            )
+        try:
+            info = self._ir_scene_store.update(
+                scene_id, await request.body(), base_revision=x_base_revision
+            )
+        except IRSceneConflictError as exc:
+            return self._scene_error(409, "scene_revision_conflict", str(exc))
+        except IRSceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        except (SceneIRValidationError, IRSceneAssetError) as exc:
+            return self._scene_error(422, "invalid_scene_ir", str(exc))
+        return JSONResponse(
+            {
+                "scene_id": info.scene_id,
+                "revision": info.revision,
+                "sha256": info.sha256,
+                "size_bytes": info.size_bytes,
+            },
+            status_code=201,
+        )
+
+    async def _submit_ir_job_endpoint(
+        self, scene_id: str, request: Request, job_type: str
+    ) -> JSONResponse:
+        self._authorize(request)
+        try:
+            options = await request.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="Expected a JSON object"
+            ) from exc
+        if not isinstance(options, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON object")
+        requested_revision = options.pop("revision", None)
+        try:
+            revision = self._ir_scene_store.revision(scene_id, requested_revision)
+        except IRSceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        job, created = self._job_store.submit(
+            job_type,
+            scene_id,
+            revision.revision,
+            options,
+            max_attempts=int(self._scene_config().get("job_max_attempts", 3)),
+        )
+        return JSONResponse(
+            {
+                "job_id": job.job_id,
+                "job_type": job.job_type,
+                "scene_id": job.scene_id,
+                "scene_revision": job.scene_revision,
+                "status": job.status,
+                "status_url": f"/v2/jobs/{job.job_id}",
+                "deduplicated": not created,
+            },
+            status_code=202,
+        )
+
+    async def _submit_observe_job_endpoint(
+        self, scene_id: str, request: Request
+    ) -> JSONResponse:
+        return await self._submit_ir_job_endpoint(scene_id, request, "observe")
+
+    async def _submit_validate_job_endpoint(
+        self, scene_id: str, request: Request
+    ) -> JSONResponse:
+        return await self._submit_ir_job_endpoint(scene_id, request, "validate")
+
+    async def _submit_export_job_endpoint(
+        self, scene_id: str, request: Request
+    ) -> JSONResponse:
+        return await self._submit_ir_job_endpoint(scene_id, request, "export")
+
+    async def _get_job_endpoint(self, job_id: str, request: Request) -> JSONResponse:
+        self._authorize(request)
+        try:
+            job = self._job_store.get(job_id)
+        except JobNotFoundError as exc:
+            return self._scene_error(404, "job_not_found", str(exc))
+        return JSONResponse(self._public_job(job))
+
+    async def _cancel_job_endpoint(self, job_id: str, request: Request) -> JSONResponse:
+        self._authorize(request)
+        try:
+            job = self._job_store.cancel(job_id)
+        except JobNotFoundError as exc:
+            return self._scene_error(404, "job_not_found", str(exc))
+        except ValueError as exc:
+            return self._scene_error(409, "job_not_cancellable", str(exc))
+        return JSONResponse(self._public_job(job))
+
+    async def _get_observation_endpoint(
+        self, observation_id: str, request: Request
+    ) -> JSONResponse:
+        self._authorize(request)
+        job = self._completed_result_job(observation_id, "observe")
+        manifest_path = self._safe_result_path(
+            self._scene_data_root, job.result.get("manifest_path")
+        )
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError) as exc:
+            return self._scene_error(500, "observation_result_invalid", str(exc))
+        for item in manifest.get("views", []):
+            item["url"] = f"/v2/observations/{observation_id}/views/{item['view']}"
+        return JSONResponse(manifest)
+
+    async def _get_observation_view_endpoint(
+        self, observation_id: str, view: str, request: Request
+    ) -> Response:
+        self._authorize(request)
+        job = self._completed_result_job(observation_id, "observe")
+        selected = next(
+            (item for item in job.result.get("views", []) if item.get("view") == view),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Observation view not found")
+        path = self._safe_result_path(self._scene_data_root, selected.get("path"))
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Observation file not found")
+        media_type = "image/webp" if path.suffix.lower() == ".webp" else "image/png"
+        return Response(
+            path.read_bytes(),
+            media_type=media_type,
+            headers={"Content-Disposition": f'inline; filename="{path.name}"'},
+        )
+
+    async def _get_export_endpoint(
+        self, export_id: str, request: Request
+    ) -> StreamingResponse:
+        self._authorize(request)
+        job = self._completed_result_job(export_id, "export")
+        path = self._safe_result_path(
+            self._scene_output_root, job.result.get("zip_path")
+        )
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Export file not found")
+
+        async def chunks():
+            with path.open("rb") as source:
+                while content := source.read(1024 * 1024):
+                    yield content
+
+        return StreamingResponse(
+            chunks(),
+            media_type="application/zip",
+            headers={
+                "X-Scene-ID": job.scene_id,
+                "X-Scene-Revision": str(job.scene_revision),
+                "X-Export-SHA256": str(job.result.get("sha256", "")),
+                "Content-Length": str(path.stat().st_size),
+                "Content-Disposition": f'attachment; filename="{path.name}"',
+            },
+        )
+
+    def _completed_result_job(self, job_id: str, expected_type: str):
+        try:
+            job = self._job_store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Result not found") from exc
+        if job.job_type != expected_type:
+            raise HTTPException(status_code=404, detail="Result not found")
+        if job.status != "completed" or job.result is None:
+            raise HTTPException(status_code=409, detail="Result is not ready")
+        return job
+
+    @staticmethod
+    def _safe_result_path(root: Path, relative: Any) -> Path:
+        if not isinstance(relative, str):
+            raise HTTPException(status_code=500, detail="Invalid result path")
+        resolved_root = root.resolve()
+        path = (root / relative).resolve()
+        if path != resolved_root and resolved_root not in path.parents:
+            raise HTTPException(status_code=500, detail="Invalid result path")
+        return path
+
+    @staticmethod
+    def _public_job(job) -> dict[str, Any]:
+        return {
+            "job_id": job.job_id,
+            "job_type": job.job_type,
+            "scene_id": job.scene_id,
+            "scene_revision": job.scene_revision,
+            "request": job.request,
+            "status": job.status,
+            "progress": job.progress,
+            "attempt": job.attempt,
+            "max_attempts": job.max_attempts,
+            "result": job.result,
+            "error": (
+                {
+                    "code": job.error_code,
+                    "message": job.error_message,
+                    "retryable": job.retryable,
+                }
+                if job.error_code
+                else None
+            ),
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "updated_at": job.updated_at,
+        }
+
     def _tools_endpoint(self) -> dict[str, Any]:
         result = {
             "enabled": [backend.to_dict() for backend in self._enabled_backend_specs()],
@@ -220,6 +560,13 @@ class AssetAcquisitionApp:
         }
         if self._scene_store is not None:
             result["routes"]["scenes"] = "/v1/scenes"
+        if self._ir_scene_store is not None:
+            result["routes"]["scene_ir"] = "/v2/scenes"
+            result["routes"]["scene_ir_schema"] = "/v2/scene-schema"
+        if self._job_store is not None:
+            result["routes"]["scene_jobs"] = "/v2/jobs/{job_id}"
+            result["routes"]["observations"] = "/v2/observations/{observation_id}"
+            result["routes"]["exports"] = "/v2/exports/{export_id}"
         return result
 
     async def _create_scene_endpoint(

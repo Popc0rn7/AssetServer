@@ -1,8 +1,9 @@
 # Internal Static Scene Renderer API
 
-This contract separates AssetServer scene storage from the heavy Blender/Drake
-runtime. The renderer is an internal trusted service. AssetServer is its only
-expected caller.
+This legacy v1 contract separates AssetServer scene storage from the heavy
+Blender/Drake runtime. New integrations use Scene IR v2 and resolve
+`asset://sha256/...` references from the shared `data/assets` volume. Agents do
+not upload model binaries to either contract.
 
 ## Render
 

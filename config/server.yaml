@@ -53,7 +53,7 @@ docker:
       ports:
         - "7100:7100"
       volumes:
-        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
+        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
 
 # Persistent runtime services are part of AssetServer itself. They are configured
 # here because most pipelines depend on them and they are not treated as
@@ -61,6 +61,12 @@ docker:
 runtime:
   scene_server:
     enabled: false
+    ir_enabled: ${oc.env:ASSETSERVER_SCENE_IR_ENABLED,true}
+    data_root: ${oc.env:ASSETSERVER_DATA_ROOT,data}
+    output_root: ${oc.env:ASSETSERVER_OUTPUT_ROOT,outputs}
+    job_max_attempts: 3
+    job_lease_seconds: 300
+    job_heartbeat_seconds: 30
     root: ${oc.env:ASSETSERVER_SCENE_ROOT,data/scenes}
     renderer_url: ${oc.env:ASSETSERVER_RENDERER_URL,null}
     render_timeout_s: 300

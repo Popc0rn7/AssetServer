@@ -7,11 +7,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      # Data directories (download on host, mount into container).
+      # Datasets, content-addressed assets, scenes, caches, and jobs.
       - ./data:/app/data
       # SAM3D model checkpoints (requires HuggingFace auth).
       - ./checkpoints:/app/checkpoints
-      # Generated scene outputs.
+      # Final expanded scene packages and ZIPs only.
       - ./outputs:/app/outputs
     ports:
       - "7010:7010"

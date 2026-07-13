@@ -118,17 +118,23 @@ ARG BLENDER_VERSION=4.5.4
 ARG DRAKE_VERSION=1.47.0
 ARG PYPI_INDEX_URL=""
 WORKDIR /app
+COPY assetserver /app/assetserver
+COPY scripts/build_scene_from_ir.py /app/scripts/build_scene_from_ir.py
+COPY scripts/smoke_scene_viewer.py /app/scripts/smoke_scene_viewer.py
 RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
     && uv pip install \
        --index https://download.blender.org/pypi/ \
        "bpy==${BLENDER_VERSION}" "drake==${DRAKE_VERSION}" \
-    && python -c "import bpy, pydrake; print(bpy.app.version_string)"
+       "pydantic>=2" "PyYAML>=6" \
+    && python -c "import bpy, pydrake, pydantic, yaml; print(bpy.app.version_string)"
 RUN useradd --create-home --uid 10003 scene-viewer \
     && mkdir -p /var/lib/scene-viewer /var/cache/scene-viewer \
     && chown -R scene-viewer:scene-viewer \
        /var/lib/scene-viewer /var/cache/scene-viewer
 ENV PYTHONPATH=/app \
+    ASSETSERVER_DATA_ROOT=/data \
+    ASSETSERVER_OUTPUT_ROOT=/outputs \
     XDG_CACHE_HOME=/var/cache/scene-viewer/xdg \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
 USER scene-viewer
-CMD ["python", "-c", "import bpy, pydrake; print('AssetServer scene viewer ready')"]
+CMD ["python", "-m", "assetserver.job_worker", "--database", "/data/jobs/jobs.sqlite3", "--handler", "observe=assetserver.scene_job_handlers:observe", "--handler", "validate=assetserver.scene_job_handlers:validate", "--handler", "export=assetserver.scene_job_handlers:export", "--lease-seconds", "300", "--heartbeat-seconds", "30"]

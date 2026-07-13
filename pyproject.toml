@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=1.26,<2.0",
     "omegaconf>=2.3.0",
     "Pillow>=11.0.0",
+    "pydantic>=2.0",
     "python-dotenv>=1.1.1",
     "python-multipart>=0.0.20",
     "PyYAML>=6.0",
@@ -29,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 asset-acquisition-server = "assetserver.asset_acquisition_server.standalone_server:main"
+assetserver-job-worker = "assetserver.job_worker:main"
 
 [dependency-groups]
 dev = [

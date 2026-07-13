@@ -196,6 +196,26 @@ Start the gateway:
 uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --port 7010
 ```
 
+Build and start the persistent Blender/Drake scene worker:
+
+```bash
+scripts/build_scene_viewer_docker.sh
+scripts/run_scene_viewer_docker.sh --gpu 0
+```
+
+The worker shares `data/` with the gateway, claims jobs from
+`data/jobs/jobs.sqlite3`, writes observations below `data/scenes`, and writes
+only completed scene packages and ZIPs below `outputs/`. Use
+`scripts/run_scene_viewer_docker.sh --smoke` for a one-shot Blender render, or
+`--foreground` to run the worker attached. CPU-only startup is available with
+`--no-gpu`.
+
+Follow a detached worker with:
+
+```bash
+docker logs -f assetserver-scene-viewer-worker
+```
+
 It exposes operational endpoints plus the public APIs in `API.md`:
 
 - `GET /health`

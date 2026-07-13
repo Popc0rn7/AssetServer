@@ -4,6 +4,47 @@ This document defines the public HTTP API exposed by the AssetServer gateway.
 Backend service APIs, container paths, and storage implementation details are not
 part of this contract.
 
+## Scene IR v2
+
+Scene IR v2 is the agent-facing scene contract. Agents submit complete YAML
+documents and receive rendered observations; GLB, OBJ, SDF, collision meshes,
+and host paths are never part of the agent response. Assets are referenced as
+`asset://sha256/<digest>` and resolved internally from `data/assets`.
+
+The synchronous revision endpoints are:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v2/scenes` | Create revision 1 from `application/yaml`. |
+| `GET` | `/v2/scenes/{scene_id}` | Read the latest or requested YAML revision. |
+| `PUT` | `/v2/scenes/{scene_id}` | Replace the full YAML document using `X-Base-Revision`. |
+
+All transforms use meters, a right-handed Z-up frame, and RPY degrees. Scene
+documents contain room and object instances; visual geometry, collision data,
+inertia, and articulated topology remain in the referenced asset manifest.
+
+The existing `/v1/scenes` SDF ZIP API is deprecated and remains available for
+one migration cycle. It must not be extended with new scene behavior.
+
+Long-running Scene IR operations are persisted in `data/jobs/jobs.sqlite3` and
+return `202 Accepted`. Jobs are pinned to a concrete scene revision; identical
+requests for the same operation and revision are deduplicated.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v2/scenes/{scene_id}/observe` | Queue Blender observation. |
+| `POST` | `/v2/scenes/{scene_id}/validate` | Queue Drake validation. |
+| `POST` | `/v2/scenes/{scene_id}/exports` | Queue final package export. |
+| `GET` | `/v2/jobs/{job_id}` | Read status, progress, result, or error. |
+| `POST` | `/v2/jobs/{job_id}/cancel` | Cancel a queued job. |
+| `GET` | `/v2/observations/{observation_id}` | Read view metadata and image URLs. |
+| `GET` | `/v2/observations/{observation_id}/views/{view}` | Download one rendered view. |
+| `GET` | `/v2/exports/{export_id}` | Download a completed final scene ZIP. |
+
+Workers claim jobs transactionally with a renewable lease. Expired leases are
+retried up to `job_max_attempts`; SQLite stores only job metadata and relative
+result references, never images, meshes, Blend files, or ZIP bodies.
+
 > Status: this is the target v1 contract. The SAM3D generate-and-download behavior
 > described here is being used as the implementation specification.
 
