@@ -1,23 +1,24 @@
 from pathlib import Path
 
-
-def test_run_script_initializes_bind_mounted_asset_store_for_service_user():
-    script = Path("scripts/run_sam3d_docker.sh").read_text()
-
-    initializer = 'run --rm --user 0 --entrypoint /bin/sh'
-    service_run = 'run --name assetserver-sam3d'
-    assert initializer in script
-    assert '-v "$ASSETS:/assets"' in script
-    assert "chown 10001:10001 /assets" in script
-    assert script.index(initializer) < script.index(service_run)
+import yaml
 
 
-def test_manual_and_gateway_launch_share_outputs_asset_root():
-    script = Path("scripts/run_sam3d_docker.sh").read_text()
-    config = Path("config/generate/sam3d.yaml").read_text()
+def test_sam3d_uses_host_owned_shared_data_without_recursive_chown():
+    manager = Path("scripts/docker_service.py").read_text()
+    service = yaml.safe_load(Path("docker/services.yaml").read_text())["services"][
+        "sam3d"
+    ]
 
-    assert 'ASSETS="${SAM3D_ASSETS:-$PWD/outputs/sam3d}"' in script
-    assert (
-        '"${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs/sam3d:'
-        '/var/lib/sam3d/assets"'
-    ) in config
+    assert service["data"] == "read-write"
+    assert service["run_as_host"] is True
+    assert service["environment"]["ASSETSERVER_ASSET_ROOT"] == "/data/assets"
+    assert "os.getuid()" in manager and "os.getgid()" in manager
+    assert "chown" not in manager
+
+
+def test_container_manager_is_the_only_build_run_interface():
+    assert Path("scripts/docker_service.sh").is_file()
+    assert Path("scripts/docker_service.py").is_file()
+    assert not list(Path("scripts").glob("build_*_docker.sh"))
+    assert not list(Path("scripts").glob("run_*_docker.sh"))
+    assert not Path("scripts/build_sam3d_image.sh").exists()

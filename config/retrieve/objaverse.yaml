@@ -7,27 +7,6 @@ server:
   host: 127.0.0.1
   port: 7007
 
-docker:
-  enabled: true
-  image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
-  container_name: assetserver-objaverse
-  command:
-    - python
-    - -m
-    - assetserver.objaverse_retrieval_server.standalone_server
-    - --host
-    - 0.0.0.0
-    - --port
-    - "7007"
-  ports:
-    - "7007:7007"
-  gpu: true
-  depends_on:
-    - postprocess
-  volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs:/app/outputs"
-
 params:
   preload_retriever: true
   objaverse_data_path: data/objathor-assets

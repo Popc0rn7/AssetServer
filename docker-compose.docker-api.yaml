@@ -1,7 +1,0 @@
-services:
-  assetserver:
-    environment:
-      - ASSETSERVER_DOCKER_LAUNCH_BACKEND=true
-      - ASSETSERVER_HOST_ROOT=${PWD}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock

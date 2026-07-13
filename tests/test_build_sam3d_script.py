@@ -33,7 +33,9 @@ def test_build_script_uses_plain_docker_build_with_separate_tags(tmp_path):
     subprocess.run(
         [
             "bash",
-            "scripts/build_sam3d_docker.sh",
+            "scripts/docker_service.sh",
+            "build",
+            "sam3d",
             "--proxy",
             "http://host.docker.internal:7890",
             "--sudo",
@@ -52,14 +54,15 @@ def test_build_script_uses_plain_docker_build_with_separate_tags(tmp_path):
     assert args[:5] == [
         "build",
         "-f",
-        "docker/3d/Dockerfile",
+        "docker/Dockerfile",
         "--target",
         "sam3d-runtime",
     ]
     assert "buildx" not in args
-    assert "assetserver-sam3d:dev" in args
+    assert "assetserver/sam3d:dev" in args
     assert "GITHUB_URL_PREFIX=https://github-mirror.example/https://github.com/" in args
     assert "PYPI_INDEX_URL=https://pypi-mirror.example/simple" in args
+    assert "UV_HTTP_TIMEOUT=300" in args
     assert "HTTP_PROXY=http://host.docker.internal:7890" in args
     assert "HTTPS_PROXY=http://host.docker.internal:7890" in args
     assert "host.docker.internal:host-gateway" in args

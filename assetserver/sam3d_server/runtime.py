@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+import logging
 
 from pathlib import Path
 
 from .model_bundle import ModelBundle, validate_bundle
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_runtime_cache_dirs(cache_root: str | Path) -> None:
@@ -33,12 +36,41 @@ def seed_dinov2_cache(
     checkpoints = cache / "hub" / "checkpoints"
     if not source.is_dir():
         raise RuntimeError(f"DINOv2 source missing from image: {source}")
+    if not (source / "hubconf.py").is_file():
+        raise RuntimeError(f"DINOv2 hubconf.py missing from image: {source}")
     shutil.copytree(source, repo, dirs_exist_ok=True)
     checkpoints.mkdir(parents=True, exist_ok=True)
     cached_weight = checkpoints / "dinov2_vitl14_reg4_pretrain.pth"
     if cached_weight.exists() or cached_weight.is_symlink():
         cached_weight.unlink()
     cached_weight.symlink_to(bundle.dino_weights)
+
+
+def force_local_dinov2_hub(source_root: str | Path) -> None:
+    """Redirect the upstream SAM3D DINO hub call to image-local source code."""
+    source = Path(source_root).resolve()
+    if not (source / "hubconf.py").is_file():
+        raise RuntimeError(f"DINOv2 local source is incomplete: {source}")
+
+    import torch
+
+    current = torch.hub.load
+    if getattr(current, "_assetserver_dinov2_source", None) == str(source):
+        return
+
+    def local_load(repo_or_dir, model, *args, **kwargs):
+        repository = str(repo_or_dir).split(":", 1)[0].rstrip("/")
+        requested_source = str(kwargs.get("source", "github"))
+        if repository == "facebookresearch/dinov2" and requested_source == "github":
+            logger.info(
+                "Redirecting DINOv2 torch.hub load to offline source %s", source
+            )
+            repo_or_dir = str(source)
+            kwargs["source"] = "local"
+        return current(repo_or_dir, model, *args, **kwargs)
+
+    local_load._assetserver_dinov2_source = str(source)  # type: ignore[attr-defined]
+    torch.hub.load = local_load
 
 
 class SAM3DRuntime:
@@ -70,6 +102,9 @@ class SAM3DRuntime:
 
     def _preload(self) -> None:
         try:
+            force_local_dinov2_hub(
+                os.environ.get("SAM3D_DINOV2_SOURCE", "/opt/dinov2")
+            )
             from assetserver.geometry_generation_server.sam3d_pipeline_manager import (
                 SAM3DPipelineManager,
             )

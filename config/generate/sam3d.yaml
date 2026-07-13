@@ -1,25 +1,8 @@
 name: sam3d
 type: geometry_generation
 role: generate
-enabled: true 
+enabled: true
 
 server:
   host: 127.0.0.1
   port: 7000
-
-docker:
-  enabled: true
-  image: ${oc.env:ASSETSERVER_SAM3D_DOCKER_IMAGE,assetserver-sam3d:dev}
-  container_name: assetserver-sam3d
-  health_url: http://127.0.0.1:7000/health/ready
-  ports:
-    - "7000:7000"
-  gpu: true
-  gpu_device: ${oc.env:ASSETSERVER_SAM3D_GPU_DEVICE,0}
-  environment:
-    - HF_HUB_OFFLINE=1
-    - TRANSFORMERS_OFFLINE=1
-  volumes:
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/checkpoints:/models:ro"
-    - "${oc.env:ASSETSERVER_HOST_ROOT,.}/outputs/sam3d:/var/lib/sam3d/assets"
-    - "sam3d-cache:/var/cache/sam3d"

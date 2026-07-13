@@ -1,0 +1,84 @@
+services:
+  sam3d:
+    target: sam3d-runtime
+    image: assetserver/sam3d
+    image_env: ASSETSERVER_SAM3D_IMAGE
+    container: assetserver-sam3d
+    gpu: true
+    port: "127.0.0.1:7000:7000"
+    ready_url: http://127.0.0.1:7000/health/ready
+    ready_timeout_s: 900
+    model_host: checkpoints
+    model_container: /models
+    model_validator: assetserver.sam3d_server.model_tool
+    data: read-write
+    cache_host: data/cache/sam3d
+    cache_container: /var/cache/sam3d
+    run_as_host: true
+    environment:
+      HOME: /tmp
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SAM3D_ASSET_ROOT: /data/sam3d-v1
+      ASSETSERVER_ASSET_ROOT: /data/assets
+      ASSETSERVER_STAGING_ROOT: /data/jobs/staging
+
+  openclip:
+    target: openclip-runtime
+    image: assetserver/openclip
+    image_env: ASSETSERVER_OPENCLIP_IMAGE
+    container: assetserver-openclip
+    gpu: true
+    port: "127.0.0.1:7006:7006"
+    ready_url: http://127.0.0.1:7006/health/ready
+    ready_timeout_s: 300
+    model_host: checkpoints/open_clip
+    model_container: /models
+    model_validator: assetserver.openclip_server.model_tool
+    cache_volume: openclip-cache
+    cache_container: /var/cache/openclip
+    run_as_host: false
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+
+  hunyuan3d:
+    target: hunyuan3d-runtime
+    image: assetserver/hunyuan3d
+    image_env: ASSETSERVER_HUNYUAN3D_IMAGE
+    container: assetserver-hunyuan3d
+    gpu: true
+    port: "127.0.0.1:7002:7002"
+    ready_url: http://127.0.0.1:7002/health
+    ready_timeout_s: 900
+    model_host: checkpoints
+    model_container: /models
+    data: read-write
+    cache_host: data/cache/hunyuan3d
+    cache_container: /var/cache/hunyuan3d
+    run_as_host: true
+    environment:
+      HOME: /tmp
+      XDG_CACHE_HOME: /var/cache/hunyuan3d
+      HUNYUAN3D_MODEL_DIR: /models/Hunyuan3D-2
+      HUNYUAN3D_MINI_MODEL_DIR: /models/Hunyuan3D-2mini
+      ASSETSERVER_ASSET_ROOT: /data/assets
+      ASSETSERVER_STAGING_ROOT: /data/jobs/staging
+
+  scene-viewer:
+    target: scene-viewer
+    image: assetserver/scene-viewer
+    image_env: ASSETSERVER_SCENE_VIEWER_IMAGE
+    container: assetserver-scene-viewer-worker
+    gpu: optional
+    data: read-write
+    assets_read_only: true
+    outputs: read-write
+    cache_host: data/cache/scene-viewer
+    cache_container: /var/cache/scene-viewer
+    run_as_host: true
+    environment:
+      HOME: /tmp
+      ASSETSERVER_DATA_ROOT: /data
+      ASSETSERVER_OUTPUT_ROOT: /outputs
+      ASSETSERVER_RENDER_DEVICE: gpu

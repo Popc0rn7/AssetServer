@@ -2,7 +2,9 @@
 
 AssetServer is an HTTP backend for 3D model acquisition. It accepts reference
 images or text descriptions, runs generation or retrieval backends, and returns
-visual model files plus mandatory collision assets for physics systems.
+metadata plus immutable `asset_ref` identities. Intermediate 3D resources stay
+inside `data/assets`; agent-facing clients receive only metadata, previews,
+Scene IR observations, and final scene ZIPs.
 
 It is not an agent runtime and does not own scene planning, placement,
 validation loops, or simulation policy.
@@ -28,20 +30,25 @@ Use Python 3.11.
 uv sync --group generate --group retrieve
 ```
 
+Docker definitions are organized by service under `docker/`; the authoritative
+image map, shared-layer design, build commands, and persistent mounts are in
+[`docs/docker-guide.md`](docs/docker-guide.md). Root-level Dockerfiles and
+Compose files are intentionally not used.
+
 SAM3D is delivered as a model-free service image plus a complete offline model
 bundle. The bundle includes SAM3, SAM 3D Objects, MoGe, and DINOv2 weights; files
 under runtime caches are never treated as required models.
 
-The normal Docker workflow has three top-level shell commands:
+The normal SAM3D workflow uses the single container-service command:
 
 ```bash
 scripts/download_sam3d_ckpt.sh
-scripts/build_sam3d_docker.sh
-scripts/run_sam3d_docker.sh
+scripts/docker_service.sh build sam3d
+scripts/docker_service.sh run sam3d --gpu 0
 ```
 
 The defaults use the existing `checkpoints/` layout, image
-`assetserver-sam3d:dev`, GPU 0, and `127.0.0.1:7000`. Run
+`assetserver/sam3d:dev`, GPU 0, and `127.0.0.1:7000`. Run
 `scripts/download_sam3d_ckpt.sh --verify` to validate `model-manifest.json`
 without downloading anything. The manifest includes the exact MoGe and DINOv2
 weight files currently stored under the historical `hf-cache` and `torch-cache`
@@ -54,11 +61,19 @@ and Torch layers from the SAM3D serving Dockerfile:
 
 ```bash
 scripts/download_openclip_ckpt.sh
-scripts/build_openclip_docker.sh
-scripts/run_openclip_docker.sh
+scripts/docker_service.sh build openclip
+scripts/docker_service.sh run openclip --gpu 0
 ```
 
-The explicit backend API is:
+The SAM3D backend API used by the v2 gateway is:
+
+```text
+POST /v2/generations
+GET  /health/live
+GET  /health/ready
+```
+
+The deprecated download compatibility API is:
 
 ```text
 POST /v1/sam3d/generations
@@ -109,7 +124,8 @@ The main config is `config/server.yaml`. Backend declarations are discovered fro
 
 SAM3D, Hunyuan3D, Materials, Articulated, and the postprocess server are
 enabled by default. Materials and Articulated datasets must be present under
-`data/` on the Gateway host; they are exposed only through HTTP ZIP downloads.
+`data/` on the Gateway host; selected candidates are materialized into the
+shared content-addressed store.
 
 Enable retrieval backends with an override in `config/server.yaml`:
 
@@ -199,21 +215,20 @@ uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --por
 Build and start the persistent Blender/Drake scene worker:
 
 ```bash
-scripts/build_scene_viewer_docker.sh
-scripts/run_scene_viewer_docker.sh --gpu 0
+scripts/docker_service.sh build scene-viewer
+scripts/docker_service.sh run scene-viewer --gpu 0
 ```
 
 The worker shares `data/` with the gateway, claims jobs from
 `data/jobs/jobs.sqlite3`, writes observations below `data/scenes`, and writes
 only completed scene packages and ZIPs below `outputs/`. Use
-`scripts/run_scene_viewer_docker.sh --smoke` for a one-shot Blender render, or
-`--foreground` to run the worker attached. CPU-only startup is available with
-`--no-gpu`.
+`--foreground` runs the worker attached. `--no-gpu` is suitable for Drake
+Validate-only workers; fixed EEVEE Observe jobs explicitly require a graphics GPU.
 
 Follow a detached worker with:
 
 ```bash
-docker logs -f assetserver-scene-viewer-worker
+scripts/docker_service.sh logs scene-viewer
 ```
 
 It exposes operational endpoints plus the public APIs in `API.md`:
@@ -238,67 +253,11 @@ datasets are ready:
 .venv/bin/python tests/smoke/retrieve_gateway.py --download
 ```
 
-## Gateway Docker Backend Launch
-
-The gateway normally runs on the host and forwards traffic to backend servers.
-Backend containers can be started manually, or the gateway can manage them
-through the Docker SDK. Automatic launch is off by default. Enable it only on
-trusted machines because access to
-`/var/run/docker.sock` is effectively host-level control.
-
-Build backend images as needed:
-
-```bash
-bash scripts/build_sam3d_image.sh --sudo
-scripts/build_openclip_docker.sh --sudo
-```
-
-Run the gateway on the host without automatic Docker launch:
-
-```bash
-ASSETSERVER_DOCKER_LAUNCH_BACKEND=false \
-uv run asset-acquisition-server --config config/server.yaml --host 0.0.0.0 --port 7010
-```
-
-Start model containers manually:
-
-```bash
-bash scripts/run_sam3d_docker.sh
-scripts/run_openclip_docker.sh
-```
-
-If automatic launch is enabled, the gateway checks the requested backend before
-proxying:
-
-1. Start configured dependencies, including OpenCLIP for retrieval.
-2. Start the requested model container if it is missing or stopped.
-3. Wait for the model `/health` endpoint.
-4. Execute or forward the original HTTP request.
-
-The gateway never accepts image names or commands from request bodies. Docker
-container settings come only from local YAML config:
-
-- global services in `config/server.yaml`
-- backend containers in `config/generate/*.yaml`
-- retrieval source definitions in `config/retrieve/*.yaml`
-
-Useful status endpoint:
-
-```bash
-curl http://127.0.0.1:7010/backends
-```
-
-Important environment variables:
-
-```bash
-export ASSETSERVER_DOCKER_LAUNCH_BACKEND=true
-export ASSETSERVER_HOST_ROOT="$PWD"
-```
-
-`ASSETSERVER_HOST_ROOT` must point to the project directory on the Docker host.
-The backend containers mount data, checkpoints, and outputs from that path.
-
 ## Request Scripts
+
+The scripts below exercise deprecated backend-native APIs and write into an
+explicit scratch directory. Production clients should use the v2 gateway calls
+shown afterward.
 
 Generate with SAM3D:
 
@@ -306,7 +265,7 @@ Generate with SAM3D:
 uv run python scripts/request_sam3d.py \
   --image-path /tmp/object.png \
   --description "red ceramic mug" \
-  --output-dir outputs/sam3d_example
+  --output-dir data/jobs/staging/sam3d_example
 ```
 
 Generate with Hunyuan3D:
@@ -315,7 +274,7 @@ Generate with Hunyuan3D:
 uv run python scripts/request_hunyuan3d.py \
   --image-path /tmp/object.png \
   --description "red ceramic mug" \
-  --output-dir outputs/hunyuan3d_example
+  --output-dir data/jobs/staging/hunyuan3d_example
 ```
 
 Retrieve from HSSD:
@@ -325,7 +284,7 @@ uv run python scripts/request_hssd.py \
   --description "modern wooden chair" \
   --object-type FURNITURE \
   --dimensions 0.6,0.6,1.0 \
-  --output-dir outputs/hssd_example
+  --output-dir data/jobs/staging/hssd_example
 ```
 
 Retrieve from Objaverse/ObjectThor:
@@ -335,7 +294,7 @@ uv run python scripts/request_objaverse.py \
   --description "white ceramic mug" \
   --object-type MANIPULAND \
   --num-candidates 3 \
-  --output-dir outputs/objaverse_example
+  --output-dir data/jobs/staging/objaverse_example
 ```
 
 All wrappers call the shared backend script:
@@ -347,21 +306,30 @@ uv run python scripts/request_backend.py hssd --description "modern chair"
 uv run python scripts/request_backend.py objaverse --description "ceramic mug"
 ```
 
-Equivalent gateway calls use the same JSON payloads but route through port 7010:
+Production gateway calls upload conditioning data or return metadata-only
+candidates; they never include an output directory:
 
 ```bash
-curl -N http://127.0.0.1:7010/generate/sam3d \
-  -H 'content-type: application/json' \
-  -d '[{"image_path":"/tmp/object.png","output_dir":"outputs/sam3d_example","prompt":"red cup","backend":"sam3d"}]'
+curl http://127.0.0.1:7010/v2/generate/sam3d \
+  -F 'image=@/tmp/object.png' -F 'prompt=red cup'
 
-curl -N http://127.0.0.1:7010/generate/hunyuan3d \
-  -H 'content-type: application/json' \
-  -d '[{"image_path":"/tmp/object.png","output_dir":"outputs/hunyuan3d_example","prompt":"red cup","backend":"hunyuan3d"}]'
+curl http://127.0.0.1:7010/v2/generate/hunyuan3d \
+  -F 'image=@/tmp/object.png' -F 'prompt=red cup'
 
-curl http://127.0.0.1:7010/v1/retrieve/materials \
+curl http://127.0.0.1:7010/v2/retrieve/materials \
   -H 'content-type: application/json' \
   -d '{"description":"warm hardwood floor","num_candidates":3}'
 ```
+
+The ArtVIP adapter intentionally accepts only the regular SceneSmith-preprocessed
+SDF subset. Audit a local dataset before enabling it:
+
+```bash
+.venv/bin/python scripts/audit_artvip_dataset.py data/artvip_sdf
+```
+
+Unsupported multi-model, multi-root, or non-finite-joint assets are skipped
+during candidate selection instead of being guessed at runtime.
 
 ## HTTP API
 
@@ -412,53 +380,40 @@ Artifact download:
 
 ## Docker
 
-Build dedicated serving images:
+Only heavyweight model/3D workers are containerized. All images are targets in
+`docker/Dockerfile` and are managed through one command:
 
 ```bash
-bash scripts/build_sam3d_image.sh --sudo
-bash scripts/build_hunyuan3d_image.sh --sudo
+scripts/docker_service.sh build sam3d
+scripts/docker_service.sh build openclip
+scripts/docker_service.sh build hunyuan3d
+scripts/docker_service.sh build scene-viewer
 ```
 
-Both build scripts accept the same network environment variables. If GitHub is
-slow or blocked, use a GitHub URL prefix:
+All builds accept the same network environment. For example:
 
 ```bash
 GITHUB=https://gh-proxy.com/https://github.com/ \
-  bash scripts/build_sam3d_image.sh --sudo
-GITHUB=https://gh-proxy.com/https://github.com/ \
-  bash scripts/build_hunyuan3d_image.sh --sudo
-```
-
-or an HTTP/SOCKS proxy reachable from the build container:
-
-```bash
-bash scripts/build_sam3d_image.sh --sudo \
+  scripts/docker_service.sh build sam3d --sudo
+scripts/docker_service.sh build hunyuan3d --sudo \
   --proxy http://host.docker.internal:7890
-bash scripts/build_hunyuan3d_image.sh --sudo \
-  --proxy http://host.docker.internal:7890
-```
-
-Use a PyPI mirror for Python package downloads:
-
-```bash
 PYPI=https://pypi.tuna.tsinghua.edu.cn/simple \
-  bash scripts/build_sam3d_image.sh --sudo
-PYPI=https://pypi.tuna.tsinghua.edu.cn/simple \
-  bash scripts/build_hunyuan3d_image.sh --sudo
+  scripts/docker_service.sh build openclip --sudo
 ```
 
 The Hunyuan3D image clones `Tencent-Hunyuan/Hunyuan3D-2` during build. Hunyuan3D
 model weights should be downloaded to `checkpoints/Hunyuan3D-2` before running
 the container.
 
-Run backends from their YAML config:
+Run and manage services explicitly:
 
 ```bash
-bash scripts/run_sam3d_docker.sh
-bash scripts/run_hunyuan3d_docker.sh
+scripts/docker_service.sh run sam3d --gpu 0
+scripts/docker_service.sh stop sam3d
+scripts/docker_service.sh status
 ```
 
-The scripts read `config/generate/sam3d.yaml` and
-`config/generate/hunyuan3d.yaml`, including image, port, command, GPU flag, and
-volume mounts. Use `scripts/run_backend_docker.py BACKEND --print` to inspect
-the generated `docker run` command.
+The Gateway, Materials, and Articulated retrieval run on the host. OpenCLIP does
+not mount `data/`; it receives text or image bytes and returns embeddings. See
+[`docs/docker-guide.md`](docs/docker-guide.md) for the complete service and
+storage map.

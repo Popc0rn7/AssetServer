@@ -19,42 +19,6 @@ embedding_providers:
     dimension: 1024
     timeout_s: 30
 
-docker:
-  launch_backend: ${oc.env:ASSETSERVER_DOCKER_LAUNCH_BACKEND,false}
-  network: ${oc.env:ASSETSERVER_DOCKER_NETWORK,null}
-  startup_timeout_s: 300
-  health_interval_s: 1.0
-  services:
-    openclip:
-      enabled: true
-      image: ${oc.env:ASSETSERVER_OPENCLIP_IMAGE,assetserver-openclip:dev}
-      container_name: assetserver-openclip
-      ports:
-        - "7006:7006"
-      gpu: true
-      health_url: http://127.0.0.1:7006/health/ready
-      volumes:
-        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/checkpoints/open_clip:/models:ro"
-        - "openclip-cache:/var/cache/openclip"
-    postprocess:
-      enabled: true
-      image: ${oc.env:ASSETSERVER_DOCKER_IMAGE,assetserver:latest}
-      container_name: assetserver-postprocess
-      command:
-        - python
-        - -m
-        - assetserver.postprocess_server.standalone_server
-        - --host
-        - 0.0.0.0
-        - --port
-        - "7100"
-        - --omp-threads
-        - "4"
-      ports:
-        - "7100:7100"
-      volumes:
-        - "${oc.env:ASSETSERVER_HOST_ROOT,.}/data:/app/data"
-
 # Persistent runtime services are part of AssetServer itself. They are configured
 # here because most pipelines depend on them and they are not treated as
 # replaceable generation/retrieval sources.
@@ -73,7 +37,7 @@ runtime:
     max_sdf_bytes: 10485760
     max_package_bytes: 2147483648
   convex_decomposition:
-    enabled: true
+    enabled: false
     host: 127.0.0.1
     port: 7100
     port_range: [7100, 7150]
@@ -81,7 +45,7 @@ runtime:
     server_startup_delay: 1.0
     port_cleanup_delay: 1.0
   postprocess_server:
-    enabled: true
+    enabled: false
     host: 127.0.0.1
     port: 7100
     collision_method: coacd
@@ -94,11 +58,13 @@ tool_dirs:
   - config/generate
   - config/retrieve
 
-# Optional environment-specific overrides for discovered backend YAML files.
-# Example:
-# backends:
-#   hssd:
-#     enabled: true
-#     server:
-#       port: 7001
-backends: {}
+# P1 validation profile. These declarations override only ``enabled`` while the
+# complete backend definitions continue to come from config/generate and
+# config/retrieve.
+backends:
+  sam3d:
+    enabled: true
+  articulated:
+    enabled: true
+  materials:
+    enabled: true

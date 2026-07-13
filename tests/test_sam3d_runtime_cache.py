@@ -1,4 +1,5 @@
 import json
+import sys
 
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import yaml
 from assetserver.sam3d_server.runtime import (
     SAM3DRuntime,
     ensure_runtime_cache_dirs,
+    force_local_dinov2_hub,
     seed_dinov2_cache,
 )
 
@@ -43,6 +45,56 @@ def test_seed_dinov2_cache_rebuilds_from_image_code_and_model_weight(tmp_path):
     assert (torch_home / "hub/facebookresearch_dinov2_main/hubconf.py").is_file()
     cached_weight = torch_home / "hub/checkpoints/dinov2_vitl14_reg4_pretrain.pth"
     assert cached_weight.read_bytes() == b"weights"
+
+
+def test_dinov2_github_hub_call_is_forced_to_local_source(tmp_path, monkeypatch):
+    source = tmp_path / "dinov2"
+    source.mkdir()
+    (source / "hubconf.py").write_text("# local")
+    calls = []
+
+    def original(repo_or_dir, model, *args, **kwargs):
+        calls.append((repo_or_dir, model, args, kwargs))
+        return "model"
+
+    torch = SimpleNamespace(hub=SimpleNamespace(load=original))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    force_local_dinov2_hub(source)
+    result = torch.hub.load(
+        repo_or_dir="facebookresearch/dinov2",
+        model="dinov2_vitl14_reg",
+        source="github",
+        verbose=False,
+    )
+
+    assert result == "model"
+    assert calls == [
+        (
+            str(source.resolve()),
+            "dinov2_vitl14_reg",
+            (),
+            {"source": "local", "verbose": False},
+        )
+    ]
+
+
+def test_dinov2_redirect_does_not_change_unrelated_hub_calls(tmp_path, monkeypatch):
+    source = tmp_path / "dinov2"
+    source.mkdir()
+    (source / "hubconf.py").write_text("# local")
+    calls = []
+
+    def original(repo_or_dir, model, *args, **kwargs):
+        calls.append((repo_or_dir, model, kwargs))
+
+    torch = SimpleNamespace(hub=SimpleNamespace(load=original))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    force_local_dinov2_hub(source)
+
+    torch.hub.load("owner/other", "model", source="github")
+
+    assert calls == [("owner/other", "model", {"source": "github"})]
 
 
 def test_runtime_passes_moge_checkpoint_file_not_snapshot_directory(

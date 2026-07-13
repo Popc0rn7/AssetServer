@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_repository_fetches_are_shallow_retried_and_separate_layers():
     installer = Path("scripts/install_sam3d_docker.sh").read_text()
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
+    dockerfile = Path("docker/Dockerfile").read_text()
 
     assert "fetch --depth 1" in installer
     assert "for attempt in 1 2 3" in installer
@@ -25,7 +25,7 @@ def test_pytorch3d_uses_existing_immutable_revision():
 
 
 def test_sam3d_image_uses_one_cuda_devel_base_and_installs_uv_from_pypi():
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
+    dockerfile = Path("docker/Dockerfile").read_text()
 
     assert dockerfile.count("FROM nvidia/cuda:") == 1
     assert "-devel-ubuntu22.04 AS python-base" in dockerfile
@@ -38,7 +38,7 @@ def test_sam3d_image_uses_one_cuda_devel_base_and_installs_uv_from_pypi():
 
 
 def test_runtime_caches_are_routed_to_the_writable_cache_volume():
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
+    dockerfile = Path("docker/Dockerfile").read_text()
 
     assert "XDG_CACHE_HOME=/var/cache/sam3d/xdg" in dockerfile
     assert "XDG_CONFIG_HOME=/var/cache/sam3d/config" in dockerfile

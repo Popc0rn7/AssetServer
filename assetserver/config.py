@@ -36,13 +36,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "timeout_s": 300,
         },
     },
-    "docker": {
-        "launch_backend": False,
-        "network": None,
-        "startup_timeout_s": 300,
-        "health_interval_s": 1.0,
-        "services": {},
-    },
     "tool_dirs": [
         "config/generate",
         "config/retrieve",

@@ -1,54 +1,37 @@
 from pathlib import Path
 
+import yaml
 
-def test_scene_viewer_target_reuses_shared_python_base_without_torch_layer():
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
 
-    assert "FROM python-base AS scene-viewer" in dockerfile
-    target = dockerfile.split("FROM python-base AS scene-viewer", 1)[1]
+def test_scene_viewer_branches_before_torch_and_installs_source_last():
+    dockerfile = Path("docker/Dockerfile").read_text()
+    target = dockerfile.split("FROM python-base AS scene-viewer", 1)[1].split(
+        "FROM builder-base AS hunyuan3d-builder", 1
+    )[0]
+
     assert '"bpy==${BLENDER_VERSION}"' in target
     assert '"drake==${DRAKE_VERSION}"' in target
     assert "import bpy, pydrake" in target
+    assert target.index('"bpy==${BLENDER_VERSION}"') < target.index(
+        "COPY assetserver/__init__.py"
+    )
     assert "install_sam3d_docker.sh" not in target
 
 
-def test_scene_viewer_build_script_targets_viewer_image():
-    script = Path("scripts/build_scene_viewer_docker.sh").read_text()
+def test_scene_viewer_has_read_only_asset_overlay_and_writable_job_storage():
+    service = yaml.safe_load(Path("docker/services.yaml").read_text())["services"][
+        "scene-viewer"
+    ]
+    manager = Path("scripts/docker_service.py").read_text()
 
-    assert "--target scene-viewer" in script
-    assert "BLENDER_VERSION" in script
-    assert "DRAKE_VERSION" in script
-    assert "SCENE_VIEWER_IMAGE:-assetserver-scene-viewer:dev" in script
-    assert "--sudo" in script
-    assert "--proxy" in script
-
-
-def test_scene_viewer_includes_renderable_smoke_scene():
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
-    smoke = Path("scripts/smoke_scene_viewer.py").read_text()
-    run = Path("scripts/run_scene_viewer_docker.sh").read_text()
-
-    assert (
-        "COPY scripts/smoke_scene_viewer.py /app/scripts/smoke_scene_viewer.py"
-        in dockerfile
-    )
-    assert "BLENDER_EEVEE_NEXT" in smoke
-    assert "bpy.ops.render.render(write_still=True)" in smoke
-    assert 'bpy.data.worlds.new("SmokeWorld")' in smoke
-    assert "smoke_scene.blend" in smoke
-    assert "view_" in smoke
-    assert "--smoke" in run
-    assert "/data/cache/scene-viewer-smoke" in run
-    assert "--gpu" in run
-    assert "--output-dir" in run
-    assert "--sudo" in run
-    assert "SCENE_VIEWER_IMAGE:-assetserver-scene-viewer:dev" in run
-    assert "-e HOME=/tmp" in run
+    assert service["data"] == "read-write"
+    assert service["assets_read_only"] is True
+    assert service["outputs"] == "read-write"
+    assert "f\"{data / 'assets'}:/data/assets:ro\"" in manager
 
 
-def test_scene_viewer_runs_persistent_sqlite_worker_with_shared_storage():
-    dockerfile = Path("docker/3d/Dockerfile").read_text()
-    run = Path("scripts/run_scene_viewer_docker.sh").read_text()
+def test_scene_viewer_runs_persistent_sqlite_worker():
+    dockerfile = Path("docker/Dockerfile").read_text()
 
     assert '"assetserver.job_worker"' in dockerfile
     assert "observe=assetserver.scene_job_handlers:observe" in dockerfile
@@ -56,8 +39,3 @@ def test_scene_viewer_runs_persistent_sqlite_worker_with_shared_storage():
     assert "export=assetserver.scene_job_handlers:export" in dockerfile
     assert "ASSETSERVER_DATA_ROOT=/data" in dockerfile
     assert "ASSETSERVER_OUTPUT_ROOT=/outputs" in dockerfile
-    assert '-v "$DATA_DIR:/data"' in run
-    assert '-v "$OUTPUT_DIR:/outputs"' in run
-    assert "--restart unless-stopped" in run
-    assert "--foreground" in run
-    assert "--no-gpu" in run
