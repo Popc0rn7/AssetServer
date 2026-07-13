@@ -1,8 +1,6 @@
 ARG CUDA_VERSION=12.4.0
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder-base
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS python-base
 ARG PYTHON_VERSION=3.11
-ARG TORCH_VERSION=2.5.1
-ARG TORCHVISION_VERSION=0.20.1
 ARG UV_VERSION=0.8.22
 ARG PYPI_INDEX_URL=""
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,16 +9,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     && apt-get update && apt-get install -y --no-install-recommends \
        python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
        git git-lfs cmake ninja-build build-essential libgl1 libegl1 libglib2.0-0 \
-       libxrender1 libsm6 libxext6 \
+       libxrender1 libxkbcommon0 libsm6 libxext6 libxi6 libxxf86vm1 \
     && rm -rf /var/lib/apt/lists/*
 RUN python${PYTHON_VERSION} -m venv /opt/venv \
     && if [ -n "$PYPI_INDEX_URL" ]; then export PIP_INDEX_URL="$PYPI_INDEX_URL"; fi \
-    && /opt/venv/bin/pip install --no-cache-dir "uv==${UV_VERSION}" \
-    && if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
-    && /opt/venv/bin/uv pip install --python /opt/venv/bin/python \
-       "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
+    && /opt/venv/bin/pip install --no-cache-dir "uv==${UV_VERSION}"
 ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH CUDA_HOME=/usr/local/cuda \
     PYTHONUNBUFFERED=1
+
+FROM python-base AS builder-base
+ARG TORCH_VERSION=2.5.1
+ARG TORCHVISION_VERSION=0.20.1
+ARG PYPI_INDEX_URL=""
+RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
+    && /opt/venv/bin/uv pip install --python /opt/venv/bin/python \
+       "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
 
 FROM builder-base AS sam3d-builder
 ARG TORCH_CUDA_ARCH_LIST
@@ -109,3 +112,23 @@ ENV PYTHONPATH=/app OPENCLIP_MODEL_ROOT=/models \
 USER openclip
 EXPOSE 7006
 ENTRYPOINT ["python", "-m", "assetserver.openclip_server.standalone"]
+
+FROM python-base AS scene-viewer
+ARG BLENDER_VERSION=4.5.4
+ARG DRAKE_VERSION=1.47.0
+ARG PYPI_INDEX_URL=""
+WORKDIR /app
+RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
+    && uv pip install \
+       --index https://download.blender.org/pypi/ \
+       "bpy==${BLENDER_VERSION}" "drake==${DRAKE_VERSION}" \
+    && python -c "import bpy, pydrake; print(bpy.app.version_string)"
+RUN useradd --create-home --uid 10003 scene-viewer \
+    && mkdir -p /var/lib/scene-viewer /var/cache/scene-viewer \
+    && chown -R scene-viewer:scene-viewer \
+       /var/lib/scene-viewer /var/cache/scene-viewer
+ENV PYTHONPATH=/app \
+    XDG_CACHE_HOME=/var/cache/scene-viewer/xdg \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+USER scene-viewer
+CMD ["python", "-c", "import bpy, pydrake; print('AssetServer scene viewer ready')"]

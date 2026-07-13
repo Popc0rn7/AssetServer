@@ -7,6 +7,37 @@ part of this contract.
 > Status: this is the target v1 contract. The SAM3D generate-and-download behavior
 > described here is being used as the implementation specification.
 
+## Planned scene viewer API
+
+> Status: design record only. These routes are not implemented yet and are not
+> part of the current public v1 contract.
+
+The scene viewer will combine fast Blender EEVEE previews with optional Drake
+physical validation. Rendering and validation remain independently callable even
+when they run in the same Docker image.
+
+Planned gateway operations:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/scenes/render` | Submit a scene for asynchronous multi-view rendering. |
+| `POST` | `/v1/scenes/validate` | Submit a scene for Drake physical validation. |
+| `POST` | `/v1/scenes/inspect` | Run validation and rendering as one asynchronous job. |
+| `GET` | `/v1/scene-jobs/{job_id}` | Read job phase, progress, timing, and errors. |
+| `GET` | `/v1/scene-jobs/{job_id}/views` | List generated preview views and camera metadata. |
+
+The initial render job state model is:
+
+```text
+queued -> loading_scene -> rendering -> completed
+                                  \-> failed
+```
+
+The default preview renderer will be Blender EEVEE Next. Cycles may be added as
+an explicit final-quality mode later. The scene request schema, durable output
+contract, and validation issue schema will be specified before these routes are
+implemented.
+
 ## Conventions
 
 The examples assume the gateway is available at:

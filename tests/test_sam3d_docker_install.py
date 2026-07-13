@@ -28,7 +28,8 @@ def test_sam3d_image_uses_one_cuda_devel_base_and_installs_uv_from_pypi():
     dockerfile = Path("docker/3d/Dockerfile").read_text()
 
     assert dockerfile.count("FROM nvidia/cuda:") == 1
-    assert "-devel-ubuntu22.04 AS builder-base" in dockerfile
+    assert "-devel-ubuntu22.04 AS python-base" in dockerfile
+    assert "FROM python-base AS builder-base" in dockerfile
     assert "-runtime-ubuntu22.04" not in dockerfile
     assert "ghcr.io/astral-sh/uv" not in dockerfile
     assert 'pip install --no-cache-dir "uv==' in dockerfile
