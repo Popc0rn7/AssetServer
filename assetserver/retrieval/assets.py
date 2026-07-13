@@ -18,6 +18,10 @@ class AssetDescriptor:
     root: Path
     files: tuple[Path, ...]
     metadata: dict
+    dataset_version: str = "unknown"
+    conversion_version: str = "assetserver-p1"
+    frame: dict | None = None
+    file_aliases: tuple[tuple[str, Path], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,7 @@ class AssetCatalog:
     def _write_zip(self, output: Path, descriptor: AssetDescriptor) -> None:
         root = descriptor.root.resolve()
         entries = []
+        sources = []
         for path in sorted(descriptor.files, key=lambda item: item.as_posix()):
             resolved = path.resolve()
             if root != resolved and root not in resolved.parents:
@@ -81,6 +86,23 @@ class AssetCatalog:
                     "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
                 }
             )
+            sources.append(path)
+        existing = {entry["path"] for entry in entries}
+        for relative, source in descriptor.file_aliases:
+            if relative in existing:
+                continue
+            resolved = source.resolve()
+            if root != resolved and root not in resolved.parents:
+                raise RuntimeError(f"asset alias escapes dataset root: {source}")
+            entries.append(
+                {
+                    "path": relative,
+                    "size_bytes": resolved.stat().st_size,
+                    "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+                }
+            )
+            sources.append(source)
+            existing.add(relative)
         manifest = {
             "source": descriptor.source,
             "resource_key": descriptor.resource_key,
@@ -93,7 +115,7 @@ class AssetCatalog:
                 "manifest.json",
                 (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
             )
-            for path, entry in zip(descriptor.files, entries, strict=True):
+            for path, entry in zip(sources, entries, strict=True):
                 self._write_entry(archive, entry["path"], path.read_bytes())
 
     @staticmethod

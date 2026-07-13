@@ -5,7 +5,6 @@ import uuid
 import hashlib
 import json
 
-from asyncio import to_thread
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -21,7 +20,11 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
-from assetserver.asset_store import AssetStore
+from assetserver.asset_store import (
+    AssetStoreError,
+    ContentAddressedAssetStore,
+    StoredAsset,
+)
 from assetserver.config import BackendSpec, backend_specs, enabled_backend_specs
 from assetserver.jobs import JobNotFoundError, SQLiteJobStore
 from assetserver.scene_renderer import SceneRendererClient, SceneRendererError
@@ -43,7 +46,6 @@ from .dataclasses import (
     AssetAcquisitionServerRequest,
     AssetAcquisitionServerResponse,
 )
-from .docker_manager import DockerBackendManager
 
 console_logger = logging.getLogger(__name__)
 
@@ -63,6 +65,37 @@ HOP_BY_HOP_HEADERS = {
     "host",
     "content-length",
 }
+
+
+def _dimensions(metadata: dict[str, Any]) -> list[float] | None:
+    value = metadata.get("dimensions")
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return [float(item) for item in value]
+    return _dimensions_from_bounds(
+        {
+            "min": metadata.get("bounding_box_min"),
+            "max": metadata.get("bounding_box_max"),
+        }
+    )
+
+
+def _dimensions_from_bounds(bounds: dict[str, Any]) -> list[float] | None:
+    minimum, maximum = bounds.get("min"), bounds.get("max")
+    if not (
+        isinstance(minimum, (list, tuple))
+        and isinstance(maximum, (list, tuple))
+        and len(minimum) == len(maximum) == 3
+    ):
+        return None
+    return [float(hi) - float(lo) for lo, hi in zip(minimum, maximum, strict=True)]
+
+
+def _articulation(joints: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "articulated": bool(joints),
+        "joint_count": len(joints),
+        "joints": [item.get("name") for item in joints],
+    }
 
 
 def rewrite_sam3d_download_url(data: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +144,7 @@ class AssetAcquisitionApp:
         scene_renderer: Any | None = None,
         ir_scene_store: IRSceneStore | None = None,
         job_store: SQLiteJobStore | None = None,
+        asset_store: ContentAddressedAssetStore | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
@@ -141,15 +175,24 @@ class AssetAcquisitionApp:
         output_root = Path(scene_config.get("output_root", "outputs"))
         self._scene_data_root = data_root
         self._scene_output_root = output_root
+        self._advertise_v2_assets = bool(
+            asset_store is not None
+            or ir_scene_store is not None
+            or scene_config.get("ir_enabled", False)
+        )
+        self._asset_store = (
+            asset_store
+            or (ir_scene_store.asset_store if ir_scene_store is not None else None)
+            or ContentAddressedAssetStore(data_root / "assets")
+        )
         if ir_scene_store is None and scene_config.get("ir_enabled", False):
             ir_scene_store = IRSceneStore(
-                data_root / "scenes", AssetStore(data_root / "assets")
+                data_root / "scenes", ContentAddressedAssetStore(data_root / "assets")
             )
         self._ir_scene_store = ir_scene_store
         if job_store is None and ir_scene_store is not None and config is not None:
             job_store = SQLiteJobStore(data_root / "jobs" / "jobs.sqlite3")
         self._job_store = job_store
-        self._docker_manager = DockerBackendManager(config)
         self._history: deque[GatewayHistoryEntry] = deque(
             maxlen=self._gateway_int("history_max_entries", 500)
         )
@@ -185,6 +228,23 @@ class AssetAcquisitionApp:
             "/v1/retrieve/{source}",
             self._retrieve_v1_endpoint,
             methods=["POST"],
+        )
+        self.app.add_api_route(
+            "/v2/generate/{backend}", self._generate_v2_endpoint, methods=["POST"]
+        )
+        self.app.add_api_route(
+            "/v2/retrieve/{source}", self._retrieve_v2_endpoint, methods=["POST"]
+        )
+        self.app.add_api_route(
+            "/v2/retrieve/{source}/{candidate_id}/materialize",
+            self._materialize_v2_endpoint,
+            methods=["POST"],
+        )
+        self.app.add_api_route(
+            "/v2/assets/{digest}", self._asset_v2_endpoint, methods=["GET"]
+        )
+        self.app.add_api_route(
+            "/v2/assets/{digest}/preview", self._asset_preview_v2_endpoint, methods=["GET"]
         )
         self.app.add_api_route(
             "/v1/assets/{source}/{asset_id}",
@@ -276,9 +336,6 @@ class AssetAcquisitionApp:
             "enabled_backends": len(self._enabled_backend_specs()),
             "gateway": self._gateway_config(),
             "runtime": self._runtime_config(),
-            "docker": {
-                "launch_backend": self._docker_manager.launch_backend,
-            },
         }
 
     async def _create_ir_scene_endpoint(self, request: Request) -> JSONResponse:
@@ -447,7 +504,9 @@ class AssetAcquisitionApp:
         except (OSError, ValueError) as exc:
             return self._scene_error(500, "observation_result_invalid", str(exc))
         for item in manifest.get("views", []):
+            item.pop("path", None)
             item["url"] = f"/v2/observations/{observation_id}/views/{item['view']}"
+        self._assert_path_free(manifest)
         return JSONResponse(manifest)
 
     async def _get_observation_view_endpoint(
@@ -522,17 +581,54 @@ class AssetAcquisitionApp:
 
     @staticmethod
     def _public_job(job) -> dict[str, Any]:
-        return {
+        allowed_request = {
+            key: value
+            for key, value in job.request.items()
+            if key
+            in {
+                "views",
+                "width",
+                "height",
+                "format",
+                "penetration_epsilon",
+                "static_static",
+                "support_contact_tolerance",
+            }
+        }
+        result = None
+        if job.result is not None:
+            if job.job_type == "observe":
+                result = {
+                    "observation_id": job.job_id,
+                    "manifest_url": f"/v2/observations/{job.job_id}",
+                    "views": [
+                        {
+                            "view": item.get("view"),
+                            "url": f"/v2/observations/{job.job_id}/views/{item.get('view')}",
+                        }
+                        for item in job.result.get("views", [])
+                    ],
+                }
+            elif job.job_type == "export":
+                result = {
+                    "export_id": job.job_id,
+                    "download_url": f"/v2/exports/{job.job_id}",
+                    "sha256": job.result.get("sha256"),
+                    "size_bytes": job.result.get("size_bytes"),
+                }
+            else:
+                result = job.result
+        payload = {
             "job_id": job.job_id,
             "job_type": job.job_type,
             "scene_id": job.scene_id,
             "scene_revision": job.scene_revision,
-            "request": job.request,
+            "request": allowed_request,
             "status": job.status,
             "progress": job.progress,
             "attempt": job.attempt,
             "max_attempts": job.max_attempts,
-            "result": job.result,
+            "result": result,
             "error": (
                 {
                     "code": job.error_code,
@@ -547,12 +643,29 @@ class AssetAcquisitionApp:
             "finished_at": job.finished_at,
             "updated_at": job.updated_at,
         }
+        AssetAcquisitionApp._assert_path_free(payload)
+        return payload
 
     def _tools_endpoint(self) -> dict[str, Any]:
+        acquisition_routes = (
+            {
+                "generate": "/v2/generate/{backend}",
+                "retrieve": "/v2/retrieve/{source}",
+                "materialize": "/v2/retrieve/{source}/{candidate_id}/materialize",
+                "assets": "/v2/assets/{digest}",
+            }
+            if self._advertise_v2_assets
+            else {
+                "generate": "/generate/{backend}",
+                "retrieve": "/v1/retrieve/{source}",
+                "assets": "/v1/assets/{source}/{asset_id}",
+            }
+        )
         result = {
             "enabled": [backend.to_dict() for backend in self._enabled_backend_specs()],
             "all": [backend.to_dict() for backend in self._backend_specs()],
-            "routes": {
+            "routes": acquisition_routes,
+            "deprecated_routes": {
                 "generate": "/generate/{backend}",
                 "retrieve": "/v1/retrieve/{source}",
                 "assets": "/v1/assets/{source}/{asset_id}",
@@ -717,10 +830,6 @@ class AssetAcquisitionApp:
         backends = self._enabled_backend_specs()
         return {
             "enabled": [backend.to_dict() for backend in backends],
-            "docker": {
-                "launch_backend": self._docker_manager.launch_backend,
-                "services": self._docker_manager.service_statuses(backends),
-            },
         }
 
     def _history_endpoint(self) -> dict[str, Any]:
@@ -746,10 +855,6 @@ class AssetAcquisitionApp:
         backend = self._require_backend("sam3d", expected_role="generate")
         self._authorize(request)
         self._check_rate_limit(self._client_id(request))
-        try:
-            await to_thread(self._docker_manager.ensure_backend_running, backend)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
         upstream_url = self._upstream_url(backend, "/v1/sam3d/generations")
         headers = self._forward_headers(request, str(uuid.uuid4()))
         timeout = httpx.Timeout(self._gateway_float("request_timeout_s", 3600.0))
@@ -765,7 +870,9 @@ class AssetAcquisitionApp:
             ) from exc
         if response.status_code >= 400:
             return JSONResponse(data, status_code=response.status_code)
-        return JSONResponse(rewrite_sam3d_download_url(data))
+        return JSONResponse(
+            rewrite_sam3d_download_url(data), headers=self._v1_deprecation_headers()
+        )
 
     async def _proxy_sam3d_asset_endpoint(
         self, asset_id: str, request: Request
@@ -777,17 +884,237 @@ class AssetAcquisitionApp:
             upstream_path=f"/v1/sam3d/assets/{asset_id}",
         )
 
+    async def _generate_v2_endpoint(
+        self, backend: str, request: Request
+    ) -> JSONResponse:
+        """Forward conditioning data only; the producer publishes shared assets."""
+        spec = self._require_backend(backend, expected_role="generate")
+        self._authorize(request)
+        self._check_rate_limit(self._client_id(request))
+        try:
+            upstream = self._upstream_url(spec, "/v2/generations")
+            headers = self._forward_headers(request, str(uuid.uuid4()))
+            async with httpx.AsyncClient(
+                timeout=self._gateway_float("request_timeout_s", 3600.0),
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    upstream, content=await request.body(), headers=headers
+                )
+            payload = response.json()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if response.status_code >= 400:
+            return JSONResponse(payload, status_code=response.status_code)
+        ref = payload.get("asset_ref") or (payload.get("asset") or {}).get("asset_ref")
+        if not isinstance(ref, str):
+            return self._scene_error(
+                502,
+                "invalid_generation_result",
+                "producer did not publish an asset_ref",
+                retryable=True,
+            )
+        try:
+            public = self._public_asset(self._asset_store.resolve(ref))
+        except AssetStoreError as exc:
+            return self._scene_error(502, "unresolved_generation_asset", str(exc), retryable=True)
+        public["generation_id"] = payload.get("generation_id")
+        self._assert_path_free(public)
+        return JSONResponse(public, status_code=201)
+
+    async def _retrieve_v2_endpoint(
+        self, source: str, request: Request
+    ) -> JSONResponse:
+        self._authorize(request)
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object")
+            data = {**data, "download": False}
+            if self._retrieval_engine is None:
+                return await self._remote_retrieve_v2(source, data, request)
+            result = await self._retrieval_engine.retrieve(source, data)
+        except KeyError:
+            return await self._remote_retrieve_v2(source, data, request)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        candidates = []
+        for item in result.get("results") or []:
+            metadata = dict(item.get("metadata") or {})
+            candidate_id = str(item.get("candidate_id") or item.get("asset_id"))
+            candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "category": metadata.get("category", source),
+                    "description": metadata.get("description", result.get("query", "")),
+                    "dimensions": _dimensions(metadata),
+                    "preview_url": metadata.get("preview_url"),
+                    "source": source,
+                    "score": item.get("score"),
+                    "articulation": _articulation(metadata.get("joints") or []),
+                    "materialize_url": f"/v2/retrieve/{source}/{candidate_id}/materialize",
+                }
+            )
+        payload = {"source": source, "query": result.get("query"), "candidates": candidates}
+        self._assert_path_free(payload)
+        return JSONResponse(payload)
+
+    async def _materialize_v2_endpoint(
+        self, source: str, candidate_id: str, request: Request
+    ) -> JSONResponse:
+        self._authorize(request)
+        try:
+            if self._retrieval_engine is None:
+                return await self._remote_materialize_v2(source, candidate_id, request)
+            stored = self._retrieval_engine.materialize(
+                source, candidate_id, self._asset_store
+            )
+        except KeyError:
+            return await self._remote_materialize_v2(source, candidate_id, request)
+        except (ValueError, AssetStoreError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        payload = self._public_asset(stored)
+        self._assert_path_free(payload)
+        return JSONResponse(payload, status_code=201)
+
+    async def _remote_retrieve_v2(
+        self, source: str, data: dict[str, Any], request: Request
+    ) -> JSONResponse:
+        try:
+            backend = self._require_backend(source, expected_role="retrieve")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        async with httpx.AsyncClient(
+            timeout=self._gateway_float("request_timeout_s", 3600), trust_env=False
+        ) as client:
+            response = await client.post(
+                self._upstream_url(backend, "/v2/candidates"), json=data
+            )
+        payload = response.json()
+        if response.status_code >= 400:
+            return JSONResponse(payload, status_code=response.status_code)
+        for candidate in payload.get("candidates", []):
+            candidate["materialize_url"] = (
+                f"/v2/retrieve/{source}/{candidate['candidate_id']}/materialize"
+            )
+        self._assert_path_free(payload)
+        return JSONResponse(payload)
+
+    async def _remote_materialize_v2(
+        self, source: str, candidate_id: str, request: Request
+    ) -> JSONResponse:
+        backend = self._require_backend(source, expected_role="retrieve")
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._gateway_float("request_timeout_s", 3600), trust_env=False
+            ) as client:
+                response = await client.post(
+                    self._upstream_url(
+                        backend, f"/v2/candidates/{candidate_id}/materialize"
+                    )
+                )
+            payload = response.json()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if response.status_code >= 400:
+            return JSONResponse(payload, status_code=response.status_code)
+        try:
+            stored = self._asset_store.resolve(payload["asset_ref"])
+        except (KeyError, AssetStoreError) as exc:
+            raise HTTPException(status_code=502, detail="unresolved materialized asset") from exc
+        public = self._public_asset(stored)
+        self._assert_path_free(public)
+        return JSONResponse(public, status_code=201)
+
+    async def _asset_v2_endpoint(self, digest: str, request: Request) -> JSONResponse:
+        self._authorize(request)
+        try:
+            stored = self._asset_store.resolve(f"asset://sha256/{digest}")
+        except AssetStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        payload = self._public_asset(stored)
+        self._assert_path_free(payload)
+        return JSONResponse(payload)
+
+    async def _asset_preview_v2_endpoint(self, digest: str, request: Request) -> Response:
+        self._authorize(request)
+        ref = f"asset://sha256/{digest}"
+        try:
+            preview = self._asset_store.preview_path(ref)
+        except AssetStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if preview is None:
+            raise HTTPException(status_code=404, detail="Asset preview not found")
+        media_type = {
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+        }.get(preview.suffix.lower(), "application/octet-stream")
+        return Response(preview.read_bytes(), media_type=media_type)
+
+    @staticmethod
+    def _public_asset(stored: StoredAsset) -> dict[str, Any]:
+        manifest = stored.manifest
+        metadata = manifest.get("metadata") or {}
+        source = manifest.get("source") or {}
+        return {
+            "asset_ref": stored.asset_ref,
+            "kind": manifest.get("kind", "object"),
+            "category": metadata.get("category", "unknown"),
+            "description": metadata.get("description", ""),
+            "dimensions": _dimensions_from_bounds(manifest.get("bounds") or {}),
+            "preview_url": (
+                f"/v2/assets/{stored.digest}/preview"
+                if manifest.get("preview") or metadata.get("preview")
+                else None
+            ),
+            "source": {
+                key: value
+                for key, value in source.items()
+                if key
+                in {
+                    "type",
+                    "name",
+                    "resource_id",
+                    "dataset_version",
+                    "conversion_version",
+                }
+            },
+            "articulation": _articulation(manifest.get("joints") or []),
+            "license": manifest.get("license") or {},
+        }
+
+    @staticmethod
+    def _assert_path_free(value: Any, field: str = "response") -> None:
+        forbidden_keys = {"mesh_path", "output_dir", "geometry_path"}
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in forbidden_keys:
+                    raise RuntimeError(f"internal path field leaked at {field}.{key}")
+                if key == "download_url" and (
+                    not isinstance(item, str) or not item.startswith("/v2/exports/")
+                ):
+                    raise RuntimeError(f"model download URL leaked at {field}.{key}")
+                AssetAcquisitionApp._assert_path_free(item, f"{field}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                AssetAcquisitionApp._assert_path_free(item, f"{field}[{index}]")
+        elif isinstance(value, str) and (
+            value.startswith("file://")
+            or value.startswith(("/home/", "/app/", "/data/", "/outputs/"))
+        ):
+            raise RuntimeError(f"internal path leaked at {field}")
+
     async def _retrieve_v1_endpoint(self, source: str, request: Request) -> Any:
         if self._retrieval_engine is None:
             raise HTTPException(status_code=404, detail="Retrieval is not configured")
         self._authorize(request)
         self._check_rate_limit(self._client_id(request))
-        try:
-            self._docker_manager.ensure_named_service_running("openclip")
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503, detail="OpenCLIP is unavailable"
-            ) from exc
         try:
             data = await request.json()
         except ValueError as exc:
@@ -820,7 +1147,7 @@ class AssetAcquisitionApp:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not download:
-            return JSONResponse(result)
+            return JSONResponse(result, headers=self._v1_deprecation_headers())
         results = result.get("results") or []
         if not results:
             raise HTTPException(status_code=404, detail="No retrieval candidates")
@@ -847,8 +1174,16 @@ class AssetAcquisitionApp:
                 "X-Asset-SHA256": asset.sha256,
                 "Content-Length": str(asset.size_bytes),
                 "Content-Disposition": f'attachment; filename="{asset_id}.zip"',
+                **self._v1_deprecation_headers(),
             },
         )
+
+    @staticmethod
+    def _v1_deprecation_headers() -> dict[str, str]:
+        return {
+            "Deprecation": "true",
+            "Link": '</tools>; rel="successor-version"',
+        }
 
     async def _generate_assets_endpoint(self, request: Request) -> Any:
         if self._generate_assets_handler is None:
@@ -937,7 +1272,6 @@ class AssetAcquisitionApp:
         backend: BackendSpec,
         upstream_path: str,
         upstream_base_url: str | None = None,
-        ensure_backend: bool = True,
     ) -> StreamingResponse:
         start = time.time()
         request_id = str(uuid.uuid4())
@@ -945,20 +1279,6 @@ class AssetAcquisitionApp:
 
         self._authorize(request)
         self._check_rate_limit(client_id)
-        if ensure_backend:
-            try:
-                await to_thread(self._docker_manager.ensure_backend_running, backend)
-            except Exception as e:
-                console_logger.exception(
-                    "Failed to ensure Docker backend '%s' is running", backend.name
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        f"Failed to start backend '{backend.name}' via Docker: {e}"
-                    ),
-                ) from e
-
         upstream_url = (
             f"{upstream_base_url}{upstream_path}"
             if upstream_base_url

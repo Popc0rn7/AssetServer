@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,10 @@ import numpy as np
 import yaml
 
 from .assets import AssetDescriptor
+from .artvip import ArtVipContractError, inspect_artvip_sdf
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,9 @@ class ArticulatedSource:
                     object_id=str(object_id),
                     data_root=data_root,
                     sdf_path=(data_root / item["sdf_path"]).resolve(),
+                    dataset_version=str(config.get("dataset_version", "unknown")),
+                    conversion_version=str(config.get("conversion_version", "assetserver-p1")),
+                    frame=config.get("frame"),
                 )
                 self.records.append(item)
                 embeddings.append(vectors[offset])
@@ -132,17 +140,48 @@ class ArticulatedSource:
     ) -> list[Candidate]:
         scores = _similarities(embedding, self.embeddings)
         eligible = [index for index, item in enumerate(self.records) if self._matches_type(item, object_type)]
-        pool = sorted(eligible, key=lambda index: scores[index], reverse=True)[: self.clip_pool_size]
+        ranked = sorted(eligible, key=lambda index: scores[index], reverse=True)
+        pool = []
+        layouts = {}
+        for index in ranked:
+            item = self.records[index]
+            try:
+                layout = inspect_artvip_sdf(item["sdf_path"])
+            except ArtVipContractError as exc:
+                LOGGER.warning(
+                    "skipping unsupported ArtVIP candidate %s: %s",
+                    item["object_id"],
+                    exc.reason,
+                )
+                continue
+            pool.append(index)
+            layouts[index] = layout
+            if len(pool) >= max(self.clip_pool_size, num_candidates):
+                break
         if desired_dimensions is not None:
             pool.sort(key=lambda index: _bbox_distance(self.records[index], desired_dimensions))
         results = []
         for index in pool[:num_candidates]:
             item = self.records[index]
+            layout = layouts[index]
             metadata = {
+                "category": item.get("category", "articulated"),
                 "description": item.get("description", ""),
                 "bounding_box_min": item["bounding_box_min"],
                 "bounding_box_max": item["bounding_box_max"],
-                "bbox_score": _bbox_distance(item, desired_dimensions) if desired_dimensions else 0.0,
+                "base_link": layout.base_link,
+                "model_name": layout.model_name,
+                "links": list(layout.links),
+                "joints": list(layout.joints),
+                "visual_parts": list(layout.visual_parts),
+                "articulation": {
+                    "articulated": layout.articulated,
+                    "joint_count": len(layout.joints),
+                    "joints": [joint["name"] for joint in layout.joints],
+                },
+                "dataset_version": item["dataset_version"],
+                "conversion_version": item["conversion_version"],
+                "frame": item["frame"],
             }
             results.append(
                 Candidate(
@@ -156,9 +195,18 @@ class ArticulatedSource:
         return results
 
     def describe_asset(self, candidate: Candidate) -> AssetDescriptor:
-        root = candidate.asset_path if candidate.asset_path.is_dir() else candidate.asset_path.parent
-        files = tuple(path for path in sorted(root.rglob("*")) if path.is_file())
-        return AssetDescriptor(self.name, candidate.resource_key, root, files, candidate.metadata)
+        layout = inspect_artvip_sdf(candidate.asset_path)
+        return AssetDescriptor(
+            self.name,
+            candidate.resource_key,
+            layout.root,
+            layout.dependency_files,
+            candidate.metadata,
+            dataset_version=candidate.metadata["dataset_version"],
+            conversion_version=candidate.metadata["conversion_version"],
+            frame=candidate.metadata.get("frame"),
+            file_aliases=layout.dependency_aliases,
+        )
 
 
 def _placement(options: dict) -> str:

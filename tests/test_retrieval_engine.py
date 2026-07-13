@@ -75,8 +75,15 @@ def test_articulated_source_filters_type_and_packages_object_directory(tmp_path)
     obj = data / "objects" / "cabinet"
     embeddings.mkdir(parents=True)
     obj.mkdir(parents=True)
-    (obj / "model.sdf").write_text("<sdf/>")
-    (obj / "mesh.obj").write_text("o mesh")
+    (obj / "model.sdf").write_text(
+        """<sdf version="1.11"><world name="root"><model name="cabinet">
+        <link name="body"><visual name="visual"><geometry><mesh>
+        <uri>body.gltf</uri></mesh></geometry></visual></link>
+        </model></world></sdf>"""
+    )
+    (obj / "body.gltf").write_text(
+        json.dumps({"asset": {"version": "2.0"}, "scenes": [{"nodes": []}]})
+    )
     np.save(embeddings / "clip_embeddings.npy", np.array([[1.0, 0.0]]))
     (embeddings / "embedding_index.yaml").write_text(yaml.safe_dump(["cabinet"]))
     (embeddings / "metadata_index.yaml").write_text(
@@ -104,14 +111,20 @@ def test_articulated_source_filters_type_and_packages_object_directory(tmp_path)
         object_type="FURNITURE",
         desired_dimensions=[1, 0.5, 2],
     )
+    without_dimensions = source.search(
+        np.array([1.0, 0.0]), num_candidates=1, object_type="FURNITURE"
+    )
     descriptor = source.describe_asset(results[0])
     catalog = AssetCatalog(cache_root=tmp_path / "cache")
     packaged = catalog.package(catalog.register(descriptor))
 
     assert results[0].resource_key == "artvip:cabinet"
+    assert results[0].metadata["base_link"] == "body"
+    assert results[0].metadata["articulation"]["joint_count"] == 0
+    assert results[0].metadata == without_dimensions[0].metadata
     with zipfile.ZipFile(packaged.path) as archive:
         assert "model.sdf" in archive.namelist()
-        assert "mesh.obj" in archive.namelist()
+        assert "body.gltf" in archive.namelist()
 
 
 def test_retrieval_engine_returns_gateway_asset_urls(tmp_path):

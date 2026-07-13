@@ -1,6 +1,9 @@
 """FastAPI application for geometry generation with multi-GPU workers."""
 
 import logging
+import hashlib
+import os
+import tempfile
 import time
 import uuid
 
@@ -9,10 +12,13 @@ from queue import Queue
 from threading import Thread
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
+from assetserver.asset_store import ContentAddressedAssetStore
+from assetserver.asset_normalization import inspect_y_up_glb
+from assetserver.staging import cleanup_staging
 from assetserver.geometry_generation_server.worker_pool import GPUWorkerPool
 from assetserver.postprocess.collision import generate_collision_artifacts
 from assetserver.scheduler import StrictRoundRobinScheduler
@@ -47,6 +53,9 @@ class GeometryGenerationApp:
         )
         self._processing_thread: Thread | None = None
         self._processing_active = False
+        self._shared_assets = ContentAddressedAssetStore(
+            os.environ.get("ASSETSERVER_ASSET_ROOT", "/app/data/assets")
+        )
         self.app = FastAPI(title="AssetServer Geometry Generation")
         self._register_routes()
 
@@ -63,6 +72,9 @@ class GeometryGenerationApp:
         )
         self.app.add_api_route(
             "/assets/{asset_id}", self._asset_endpoint, methods=["GET"]
+        )
+        self.app.add_api_route(
+            "/v2/generations", self._generate_v2_endpoint, methods=["POST"]
         )
 
     def start_processing(self) -> None:
@@ -207,3 +219,65 @@ class GeometryGenerationApp:
                 results_received += 1
 
         return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+    async def _generate_v2_endpoint(
+        self,
+        image: UploadFile = File(...),
+        prompt: str = Form(""),
+    ) -> dict[str, Any]:
+        """Generate into job staging and atomically publish a metadata-only result."""
+        if image.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise HTTPException(status_code=415, detail="unsupported image type")
+        generation_id = str(uuid.uuid4())
+        staging_root = Path(
+            os.environ.get("ASSETSERVER_STAGING_ROOT", "/app/data/jobs/staging")
+        )
+        staging_root.mkdir(parents=True, exist_ok=True)
+        cleanup_staging(staging_root)
+        with tempfile.TemporaryDirectory(prefix=f"{generation_id}-", dir=staging_root) as temporary:
+            root = Path(temporary)
+            suffix = Path(image.filename or "image").suffix or ".img"
+            input_path = root / f"input{suffix}"
+            content = await image.read(25 * 1024 * 1024 + 1)
+            if len(content) > 25 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="image is too large")
+            input_path.write_bytes(content)
+            request = GeometryGenerationServerRequest(
+                image_path=str(input_path),
+                output_dir=str(root / "output"),
+                output_filename="model.glb",
+                prompt=prompt,
+                backend=self._backend,
+            )
+            result_queue: Queue = Queue(maxsize=1)
+            self._scheduler.add_batch(
+                client_id=generation_id,
+                requests=[request],
+                callback=lambda _index, result: result_queue.put(result),
+                received_timestamp=time.time(),
+            )
+            from asyncio import to_thread
+
+            status, result = await to_thread(result_queue.get, True, 3600)
+            if status != "success":
+                raise HTTPException(status_code=500, detail=str(result))
+            model_path = Path(result["geometry_path"])
+            if not model_path.is_file():
+                raise HTTPException(status_code=500, detail="generator produced no asset")
+            key = hashlib.sha256(
+                content + b"\0" + prompt.encode() + b"\0" + self._backend.encode()
+            ).hexdigest()
+            bounds, source_frame = inspect_y_up_glb(model_path)
+            sdf = b"""<sdf version='1.10'><model name='generated'><link name='base'><visual name='visual'><geometry><mesh><uri>../visual/model.glb</uri></mesh></geometry></visual><collision name='collision'><geometry><mesh><uri>../visual/model.glb</uri></mesh></geometry></collision></link></model></sdf>\n"""
+            stored = self._shared_assets.ingest(
+                {"visual/model.glb": model_path.read_bytes(), "simulation/model.sdf": sdf},
+                visual="visual/model.glb",
+                simulation={"entrypoint": "simulation/model.sdf", "base_link": "base"},
+                collision={"entrypoint": "visual/model.glb", "method": "triangle-mesh"},
+                bounds=bounds,
+                metadata={"category": "generated", "description": prompt},
+                source={"type": "generated", "name": self._backend, "resource_id": key},
+                source_frame=source_frame,
+                tool_versions={"backend": self._backend},
+            )
+        return {"generation_id": generation_id, "asset_ref": stored.asset_ref}

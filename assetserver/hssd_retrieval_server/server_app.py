@@ -1,6 +1,7 @@
 """FastAPI application for HSSD semantic retrieval."""
 
 import logging
+import os
 import time
 import uuid
 
@@ -15,6 +16,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
+from assetserver.asset_store import ContentAddressedAssetStore, IDENTITY_MATRIX
+from assetserver.asset_normalization import normalize_y_up_mesh, y_up_source_frame
 from assetserver.hssd_retrieval.retrieval import HssdRetriever
 from assetserver.postprocess.collision import generate_collision_artifacts
 from assetserver.scheduler import QueuedRequest, StrictRoundRobinScheduler
@@ -53,6 +56,10 @@ class HssdRetrievalApp:
         self._completed_requests = 0
         self._failed_requests = 0
         self._request_times: list[float] = []
+        self._v2_candidates: dict[str, Any] = {}
+        self._shared_assets = ContentAddressedAssetStore(
+            os.environ.get("ASSETSERVER_ASSET_ROOT", "/app/data/assets")
+        )
         self.app = FastAPI(title="AssetServer HSSD Retrieval")
         self._register_routes()
 
@@ -70,6 +77,12 @@ class HssdRetrievalApp:
         )
         self.app.add_api_route(
             "/assets/{asset_id}", self._asset_endpoint, methods=["GET"]
+        )
+        self.app.add_api_route("/v2/candidates", self._candidates_v2_endpoint, methods=["POST"])
+        self.app.add_api_route(
+            "/v2/candidates/{candidate_id}/materialize",
+            self._materialize_v2_endpoint,
+            methods=["POST"],
         )
 
     def _get_retriever(self) -> HssdRetriever:
@@ -197,6 +210,68 @@ class HssdRetrievalApp:
         return HssdRetrievalServerResponse(
             results=results, query_description=request.object_description
         )
+
+    def _candidates_v2_endpoint(self, data: dict[str, Any]) -> dict[str, Any]:
+        description = str(data.get("description", "")).strip()
+        if not description:
+            raise HTTPException(status_code=422, detail="description is required")
+        retriever = self._get_retriever()
+        desired = data.get("desired_dimensions")
+        candidates = retriever.retrieve_multiple(
+            description=description,
+            object_type=str(data.get("object_type", "FURNITURE")),
+            desired_dimensions=np.asarray(desired) if desired is not None else None,
+            max_candidates=max(1, min(int(data.get("num_candidates", 1)), 20)),
+        )
+        results = []
+        for candidate in candidates:
+            candidate_id = candidate.mesh_id
+            self._v2_candidates[candidate_id] = candidate
+            results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "score": float(candidate.clip_score),
+                    "category": "hssd",
+                    "description": description,
+                    "dimensions": [float(value) for value in candidate.mesh.extents],
+                    "preview_url": None,
+                    "source": "hssd",
+                    "articulation": {"articulated": False, "joint_count": 0, "joints": []},
+                }
+            )
+        return {"source": "hssd", "query": description, "candidates": results}
+
+    def _materialize_v2_endpoint(self, candidate_id: str) -> dict[str, Any]:
+        candidate = self._v2_candidates.get(candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="candidate not found")
+        mesh, transform = normalize_y_up_mesh(candidate.mesh)
+        glb = mesh.export(file_type="glb")
+        sdf = b"""<sdf version='1.10'><model name='hssd'><link name='base'><visual name='visual'><geometry><mesh><uri>../visual/model.glb</uri></mesh></geometry></visual><collision name='collision'><geometry><mesh><uri>../visual/model.glb</uri></mesh></geometry></collision></link></model></sdf>\n"""
+        minimum = [float(value) for value in mesh.bounds[0]]
+        maximum = [float(value) for value in mesh.bounds[1]]
+        stored = self._shared_assets.ingest(
+            {"visual/model.glb": glb, "simulation/model.sdf": sdf},
+            visual={"entrypoint": "visual/model.glb", "transform_to_asset": IDENTITY_MATRIX},
+            simulation={
+                "entrypoint": "simulation/model.sdf",
+                "base_link": "base",
+                "transform_to_asset": IDENTITY_MATRIX,
+            },
+            collision={"entrypoint": "visual/model.glb", "method": "triangle-mesh"},
+            bounds={"min": minimum, "max": maximum},
+            metadata={"category": "hssd", "description": ""},
+            source={
+                "type": "dataset",
+                "name": "hssd",
+                "resource_id": candidate_id,
+                "dataset_version": os.environ.get("HSSD_DATASET_VERSION", "unknown"),
+                "conversion_version": "assetserver-p1",
+            },
+            source_frame=y_up_source_frame(transform),
+            tool_versions={"materializer": "assetserver-p1"},
+        )
+        return {"asset_ref": stored.asset_ref, "source": "hssd"}
 
     def _health_endpoint(self) -> dict[str, Any]:
         avg_processing_time = (

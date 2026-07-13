@@ -7,10 +7,16 @@ from typing import Any
 
 import httpx
 import numpy as np
+import trimesh
 
 from assetserver.config import BackendSpec, project_root
 
 from .assets import AssetCatalog
+from assetserver.asset_store import (
+    ContentAddressedAssetStore,
+    StoredAsset,
+    canonical_source_frame,
+)
 from .sources import ArticulatedSource, MaterialsSource
 
 
@@ -115,6 +121,123 @@ class RetrievalEngine:
             raise KeyError(asset_id)
         return catalog.package(asset_id)
 
+    def materialize(
+        self,
+        source_name: str,
+        candidate_id: str,
+        store: ContentAddressedAssetStore,
+    ) -> StoredAsset:
+        """Copy only a selected candidate into immutable shared storage."""
+        catalog = self.catalogs.get(source_name)
+        descriptor = catalog.descriptor(candidate_id) if catalog else None
+        if descriptor is None or descriptor.source != source_name:
+            raise KeyError(candidate_id)
+        files = {
+            path.resolve().relative_to(descriptor.root.resolve()).as_posix(): path.read_bytes()
+            for path in descriptor.files
+        }
+        for relative, source in descriptor.file_aliases:
+            files.setdefault(relative, source.read_bytes())
+        if source_name == "materials":
+            return store.ingest(
+                files,
+                visual=None,
+                kind="material",
+                metadata=dict(descriptor.metadata),
+                source={
+                    "type": "dataset",
+                    "name": source_name,
+                    "resource_id": descriptor.resource_key,
+                    "dataset_version": descriptor.dataset_version,
+                    "conversion_version": descriptor.conversion_version,
+                },
+                source_frame=descriptor.frame or canonical_source_frame(),
+                license=descriptor.metadata.get("license"),
+                tool_versions={"materializer": descriptor.conversion_version},
+            )
+        metadata = dict(descriptor.metadata)
+        visual_parts = list(metadata.get("visual_parts") or [])
+        if source_name == "articulated":
+            files["visual/default.glb"] = _combine_artvip_visuals(
+                descriptor.root, visual_parts
+            )
+            visual: str | dict[str, Any] | None = {
+                "entrypoint": "visual/default.glb",
+                "parts": visual_parts,
+            }
+        else:
+            visual = _select_entrypoint(files, (".glb", ".gltf", ".obj"))
+        simulation = _select_entrypoint(files, (".sdf", ".urdf"), required=False)
+        if visual is None:
+            raise ValueError("selected asset has no supported visual entrypoint")
+        minimum = metadata.get("bounding_box_min", [0, 0, 0])
+        maximum = metadata.get("bounding_box_max", [0, 0, 0])
+        simulation_spec = (
+            {
+                "entrypoint": simulation,
+                "base_link": str(metadata.get("base_link", "base")),
+            }
+            if simulation
+            else None
+        )
+        return store.ingest(
+            files,
+            visual=visual,
+            simulation=simulation_spec,
+            bounds={"min": minimum, "max": maximum},
+            joints=list(metadata.get("joints") or []),
+            support_surfaces=list(metadata.get("support_surfaces") or []),
+            metadata=metadata,
+            source={
+                "type": "dataset",
+                "name": source_name,
+                "resource_id": descriptor.resource_key,
+                "dataset_version": descriptor.dataset_version,
+                "conversion_version": descriptor.conversion_version,
+            },
+            source_frame=descriptor.frame or canonical_source_frame(),
+            license=metadata.get("license"),
+            tool_versions={"materializer": descriptor.conversion_version},
+        )
+
+
+def _select_entrypoint(
+    files: dict[str, bytes], suffixes: tuple[str, ...], *, required: bool = True
+) -> str | None:
+    selected = next(
+        (name for name in sorted(files) if Path(name).suffix.lower() in suffixes), None
+    )
+    if selected is None and required:
+        raise ValueError(f"asset has no entrypoint with suffix in {suffixes}")
+    return selected
+
+
+def _combine_artvip_visuals(root: Path, parts: list[dict[str, Any]]) -> bytes:
+    """Create the deterministic default-pose visual used for preview/framing."""
+    meshes = []
+    for part in parts:
+        path = (root / str(part["entrypoint"])).resolve()
+        loaded = trimesh.load(path, force="scene")
+        for node_name in sorted(loaded.graph.nodes_geometry):
+            transform, geometry_name = loaded.graph[node_name]
+            geometry = loaded.geometry[geometry_name]
+            if not isinstance(geometry, trimesh.Trimesh):
+                continue
+            mesh = geometry.copy()
+            mesh.apply_transform(transform)
+            meshes.append(mesh)
+    if not meshes:
+        raise ValueError("ArtVIP asset has no loadable visual meshes")
+    combined = trimesh.util.concatenate(meshes)
+    # The combined file is a deterministic default-pose preview/framing mesh.
+    # Preserve original materials in visual.parts for observations; re-encoding
+    # source textures here produces process-dependent PNG bytes in trimesh.
+    combined.visual = trimesh.visual.ColorVisuals(
+        mesh=combined, face_colors=[180, 180, 180, 255]
+    )
+    combined.metadata.clear()
+    return combined.export(file_type="glb")
+
 
 def _retrieve_specs(config: Any) -> list[BackendSpec]:
     from assetserver.config import enabled_backend_specs
@@ -143,6 +266,9 @@ def _source_factory_from_spec(spec: BackendSpec):
             name: {
                 "data_root": _resolve(item["root"]),
                 "embeddings_root": _resolve(item["embeddings"]),
+                "dataset_version": item.get("dataset_version", "unknown"),
+                "conversion_version": item.get("conversion_version", "assetserver-p1"),
+                "frame": _as_dict(item.get("frame", {})) or None,
             }
             for name, item in source_configs.items()
             if item.get("enabled", True)

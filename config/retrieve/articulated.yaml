@@ -9,6 +9,18 @@ sources:
     enabled: true
     root: data/artvip_sdf
     embeddings: data/artvip_sdf/embeddings
+    dataset_version: artvip-local
+    conversion_version: artvip-sdf-v1
+    frame:
+      units: m
+      handedness: right
+      up_axis: +Z
+      origin: ground-center
+      transform_to_asset:
+        - [1, 0, 0, 0]
+        - [0, 1, 0, 0]
+        - [0, 0, 1, 0]
+        - [0, 0, 0, 1]
 
 search:
   default_candidates: 1

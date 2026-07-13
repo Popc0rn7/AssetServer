@@ -21,7 +21,7 @@ class Asset:
     size_bytes: int
 
 
-class AssetStore:
+class Sam3DArtifactStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -57,3 +57,7 @@ class AssetStore:
             return None
         metadata = json.loads(metadata_path.read_text())
         return Asset(parsed, path, metadata["sha256"], metadata["size_bytes"])
+
+
+# Import compatibility for the v1 standalone backend.
+AssetStore = Sam3DArtifactStore

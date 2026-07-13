@@ -4,6 +4,35 @@ This document defines the public HTTP API exposed by the AssetServer gateway.
 Backend service APIs, container paths, and storage implementation details are not
 part of this contract.
 
+## Asset acquisition v2
+
+The default agent-facing acquisition API returns metadata and immutable
+`asset://sha256/<digest>` references. It never returns an intermediate model URL
+or a host/container path.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v2/generate/{backend}` | Generate and publish a canonical asset. |
+| `POST` | `/v2/retrieve/{source}` | Search and return metadata-only candidates. |
+| `POST` | `/v2/retrieve/{source}/{candidate_id}/materialize` | Publish one selected candidate. |
+| `GET` | `/v2/assets/{digest}` | Read public asset metadata. |
+| `GET` | `/v2/assets/{digest}/preview` | Read the optional 2D preview. |
+
+Asset metadata contains `asset_ref`, `kind`, category, description, dimensions,
+preview URL, source identity, license, and an articulation summary. Materials use
+`kind: material` and cannot be placed as Scene IR objects. A materialized asset is
+not inserted into a scene automatically; the next complete Scene IR revision must
+reference it explicitly.
+
+All `asset/v2` producers declare source units, handedness, up axis, origin, and a
+finite `transform_to_asset`. The canonical asset frame is metres, right-handed,
+Z-up, with a ground-centre origin. Visual and simulation entrypoints carry their
+own transforms so Blender and Drake resolve the same frame.
+
+The `/v1` generation/retrieval routes remain available for compatibility and
+include an HTTP `Deprecation: true` header. New clients should discover the v2
+routes through `/tools`.
+
 ## Scene IR v2
 
 Scene IR v2 is the agent-facing scene contract. Agents submit complete YAML
@@ -45,8 +74,7 @@ Workers claim jobs transactionally with a renewable lease. Expired leases are
 retried up to `job_max_attempts`; SQLite stores only job metadata and relative
 result references, never images, meshes, Blend files, or ZIP bodies.
 
-> Status: this is the target v1 contract. The SAM3D generate-and-download behavior
-> described here is being used as the implementation specification.
+The sections below document the deprecated v1 compatibility surface.
 
 ## Planned scene viewer API
 
