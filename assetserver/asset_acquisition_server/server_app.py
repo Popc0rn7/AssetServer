@@ -2,21 +2,31 @@ import logging
 import os
 import time
 import uuid
+import hashlib
 
 from asyncio import to_thread
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
+from typing import Literal
 
 import httpx
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from omegaconf import OmegaConf
+from pydantic import BaseModel, Field
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
 from assetserver.config import BackendSpec, backend_specs, enabled_backend_specs
+from assetserver.scene_renderer import SceneRendererClient, SceneRendererError
+from assetserver.scenes import (
+    SceneConflictError,
+    SceneNotFoundError,
+    ScenePackageError,
+    SceneStore,
+)
 
 from .dataclasses import (
     AssetAcquisitionServerRequest,
@@ -67,6 +77,17 @@ class GatewayHistoryEntry:
     error: str | None = None
 
 
+class SceneRenderRequest(BaseModel):
+    revision: int | None = Field(default=None, ge=1)
+    views: list[str] = Field(
+        default_factory=lambda: ["top", "front", "side", "perspective"],
+        min_length=1,
+    )
+    width: int = Field(default=512, ge=1, le=4096)
+    height: int = Field(default=512, ge=1, le=4096)
+    format: Literal["webp", "png"] = "webp"
+
+
 class AssetAcquisitionApp:
     """FastAPI gateway for routing model traffic to backend services."""
 
@@ -75,6 +96,8 @@ class AssetAcquisitionApp:
         generate_assets_handler: GenerateAssetsHandler | None = None,
         config: Any | None = None,
         retrieval_engine: Any | None = None,
+        scene_store: SceneStore | None = None,
+        scene_renderer: Any | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
@@ -83,6 +106,24 @@ class AssetAcquisitionApp:
 
             retrieval_engine = RetrievalEngine.from_config(config)
         self._retrieval_engine = retrieval_engine
+        scene_config = self._scene_config()
+        if scene_store is None and scene_config.get("enabled", False):
+            scene_store = SceneStore(
+                scene_config.get("root", "data/scenes"),
+                max_package_bytes=int(
+                    scene_config.get("max_package_bytes", 2 * 1024**3)
+                ),
+                max_sdf_bytes=int(scene_config.get("max_sdf_bytes", 10 * 1024**2)),
+            )
+        if scene_renderer is None and scene_store is not None:
+            renderer_url = scene_config.get("renderer_url")
+            if renderer_url:
+                scene_renderer = SceneRendererClient(
+                    renderer_url,
+                    timeout_s=float(scene_config.get("render_timeout_s", 300)),
+                )
+        self._scene_store = scene_store
+        self._scene_renderer = scene_renderer
         self._docker_manager = DockerBackendManager(config)
         self._history: deque[GatewayHistoryEntry] = deque(
             maxlen=self._gateway_int("history_max_entries", 500)
@@ -131,6 +172,28 @@ class AssetAcquisitionApp:
         self.app.add_api_route(
             "/assets/{asset_id}", self._asset_endpoint, methods=["GET"]
         )
+        if self._scene_store is not None:
+            self.app.add_api_route(
+                "/v1/scenes", self._create_scene_endpoint, methods=["POST"]
+            )
+            self.app.add_api_route(
+                "/v1/scenes/{scene_id}/sdf", self._scene_sdf_endpoint, methods=["GET"]
+            )
+            self.app.add_api_route(
+                "/v1/scenes/{scene_id}/sdf",
+                self._update_scene_sdf_endpoint,
+                methods=["PUT"],
+            )
+            self.app.add_api_route(
+                "/v1/scenes/{scene_id}/render",
+                self._render_scene_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
+                "/v1/scenes/{scene_id}/final",
+                self._final_scene_endpoint,
+                methods=["GET"],
+            )
 
     def _health_endpoint(self) -> dict[str, Any]:
         return {
@@ -146,7 +209,7 @@ class AssetAcquisitionApp:
         }
 
     def _tools_endpoint(self) -> dict[str, Any]:
-        return {
+        result = {
             "enabled": [backend.to_dict() for backend in self._enabled_backend_specs()],
             "all": [backend.to_dict() for backend in self._backend_specs()],
             "routes": {
@@ -155,6 +218,153 @@ class AssetAcquisitionApp:
                 "assets": "/v1/assets/{source}/{asset_id}",
             },
         }
+        if self._scene_store is not None:
+            result["routes"]["scenes"] = "/v1/scenes"
+        return result
+
+    async def _create_scene_endpoint(
+        self, package: UploadFile = File(...)
+    ) -> JSONResponse:
+        if package.content_type not in {
+            "application/zip",
+            "application/octet-stream",
+            None,
+        }:
+            return self._scene_error(
+                415, "unsupported_scene_media_type", "package must be a ZIP file"
+            )
+        try:
+            scene = self._scene_store.create(package.file)
+        except ScenePackageError as exc:
+            return self._scene_error(422, "invalid_scene_package", str(exc))
+        return JSONResponse(
+            {
+                "scene_id": scene.scene_id,
+                "revision": scene.revision,
+                "sdf_url": f"/v1/scenes/{scene.scene_id}/sdf",
+                "render_url": f"/v1/scenes/{scene.scene_id}/render",
+            },
+            status_code=201,
+        )
+
+    async def _scene_sdf_endpoint(
+        self, scene_id: str, revision: int | None = Query(default=None, ge=1)
+    ) -> Response:
+        try:
+            info = self._scene_store.revision(scene_id, revision)
+            sdf = self._scene_store.read_sdf(scene_id, info.revision)
+        except SceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        return Response(
+            sdf,
+            media_type="application/xml",
+            headers={
+                "X-Scene-ID": scene_id,
+                "X-Scene-Revision": str(info.revision),
+                "ETag": f'"{info.sha256}"',
+            },
+        )
+
+    async def _update_scene_sdf_endpoint(
+        self,
+        scene_id: str,
+        request: Request,
+        x_base_revision: int = Header(alias="X-Base-Revision", ge=1),
+    ) -> JSONResponse:
+        if (
+            request.headers.get("content-type", "").split(";", 1)[0]
+            != "application/xml"
+        ):
+            return self._scene_error(
+                415,
+                "unsupported_scene_media_type",
+                "SDF updates require application/xml",
+            )
+        try:
+            info = self._scene_store.update_sdf(
+                scene_id, await request.body(), base_revision=x_base_revision
+            )
+        except SceneConflictError as exc:
+            return self._scene_error(409, "scene_revision_conflict", str(exc))
+        except SceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        except ScenePackageError as exc:
+            return self._scene_error(422, "invalid_sdf", str(exc))
+        return JSONResponse(
+            {
+                "scene_id": scene_id,
+                "revision": info.revision,
+                "sha256": info.sha256,
+                "size_bytes": info.size_bytes,
+                "validation": {
+                    "xml_valid": True,
+                    "assets_resolved": True,
+                    "warnings": [],
+                },
+            },
+            status_code=201,
+        )
+
+    async def _render_scene_endpoint(
+        self, scene_id: str, render_request: SceneRenderRequest
+    ) -> Response:
+        if self._scene_renderer is None:
+            return self._scene_error(
+                503,
+                "render_backend_unavailable",
+                "renderer is not configured",
+                retryable=True,
+            )
+        revision = render_request.revision
+        options = render_request.model_dump(exclude={"revision"})
+        try:
+            info = self._scene_store.revision(scene_id, revision)
+            package = self._scene_store.build_package(scene_id, info.revision)
+            rendered = await self._scene_renderer.render(package, options)
+        except SceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        except SceneRendererError as exc:
+            return self._scene_error(
+                exc.status, exc.error, str(exc), retryable=exc.status >= 500
+            )
+        return Response(
+            rendered,
+            media_type="application/zip",
+            headers={
+                "X-Scene-ID": scene_id,
+                "X-Scene-Revision": str(info.revision),
+                "Content-Disposition": f'attachment; filename="{scene_id}-r{info.revision}-preview.zip"',
+            },
+        )
+
+    async def _final_scene_endpoint(
+        self, scene_id: str, revision: int | None = Query(default=None, ge=1)
+    ) -> Response:
+        try:
+            info = self._scene_store.revision(scene_id, revision)
+            package = self._scene_store.build_package(scene_id, info.revision)
+        except SceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        digest = hashlib.sha256(package).hexdigest()
+        return Response(
+            package,
+            media_type="application/zip",
+            headers={
+                "X-Scene-ID": scene_id,
+                "X-Scene-Revision": str(info.revision),
+                "X-Scene-SHA256": digest,
+                "Content-Disposition": f'attachment; filename="{scene_id}-r{info.revision}.zip"',
+            },
+        )
+
+    @staticmethod
+    def _scene_error(
+        status: int, error: str, message: str, *, retryable: bool = False
+    ) -> JSONResponse:
+        return JSONResponse(
+            {"error": error, "message": message, "retryable": retryable},
+            status_code=status,
+        )
 
     def _backends_endpoint(self) -> dict[str, Any]:
         backends = self._enabled_backend_specs()
@@ -185,9 +395,7 @@ class AssetAcquisitionApp:
             upstream_path="/generate_geometries",
         )
 
-    async def _proxy_sam3d_generate_endpoint(
-        self, request: Request
-    ) -> JSONResponse:
+    async def _proxy_sam3d_generate_endpoint(self, request: Request) -> JSONResponse:
         backend = self._require_backend("sam3d", expected_role="generate")
         self._authorize(request)
         self._check_rate_limit(self._client_id(request))
@@ -205,7 +413,9 @@ class AssetAcquisitionApp:
         try:
             data = response.json()
         except ValueError as exc:
-            raise HTTPException(status_code=502, detail="invalid SAM3D response") from exc
+            raise HTTPException(
+                status_code=502, detail="invalid SAM3D response"
+            ) from exc
         if response.status_code >= 400:
             return JSONResponse(data, status_code=response.status_code)
         return JSONResponse(rewrite_sam3d_download_url(data))
@@ -228,17 +438,23 @@ class AssetAcquisitionApp:
         try:
             self._docker_manager.ensure_named_service_running("openclip")
         except Exception as exc:
-            raise HTTPException(status_code=503, detail="OpenCLIP is unavailable") from exc
+            raise HTTPException(
+                status_code=503, detail="OpenCLIP is unavailable"
+            ) from exc
         try:
             data = await request.json()
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+            raise HTTPException(
+                status_code=400, detail="Expected a JSON object"
+            ) from exc
         if not isinstance(data, dict):
             raise HTTPException(status_code=400, detail="Expected a JSON object")
         try:
             num_candidates = int(data.get("num_candidates", 1))
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="invalid num_candidates") from exc
+            raise HTTPException(
+                status_code=422, detail="invalid num_candidates"
+            ) from exc
         download_value = data.get("download", False)
         if not isinstance(download_value, bool):
             raise HTTPException(status_code=422, detail="download must be a boolean")
@@ -251,7 +467,9 @@ class AssetAcquisitionApp:
         try:
             result = await self._retrieval_engine.retrieve(source, data)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=f"Unknown source: {source}") from exc
+            raise HTTPException(
+                status_code=404, detail=f"Unknown source: {source}"
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not download:
@@ -269,9 +487,7 @@ class AssetAcquisitionApp:
         self._authorize(request)
         return await self._retrieval_file_response(source, asset_id)
 
-    async def _retrieval_file_response(
-        self, source: str, asset_id: str
-    ) -> Response:
+    async def _retrieval_file_response(self, source: str, asset_id: str) -> Response:
         try:
             asset = self._retrieval_engine.package(source, asset_id)
         except KeyError as exc:
@@ -583,6 +799,9 @@ class AssetAcquisitionApp:
         runtime = OmegaConf.to_container(self._config.runtime, resolve=True)
         assert isinstance(runtime, dict)
         return runtime
+
+    def _scene_config(self) -> dict[str, Any]:
+        return self._runtime_config().get("scene_server", {})
 
     def _gateway_config(self) -> dict[str, Any]:
         if self._config is None or "gateway" not in self._config:
