@@ -1,12 +1,17 @@
 import json
 import zipfile
 
+from dataclasses import replace
+
 import yaml
+import pytest
 
 from assetserver.asset_store import AssetStore
 from assetserver.jobs import SQLiteJobStore
 from assetserver.scene_ir_store import IRSceneStore
 import assetserver.scene_job_handlers as handlers
+from assetserver.blender_scene_worker import BlenderRecipeError
+from assetserver.jobs import JobExecutionError
 
 
 def _scene_and_job(tmp_path, monkeypatch, job_type, request=None):
@@ -64,6 +69,23 @@ def test_observe_handler_publishes_revision_scoped_images(tmp_path, monkeypatch)
     assert manifest["scene_revision"] == 1
 
 
+def test_observe_device_failure_is_non_retryable(tmp_path, monkeypatch):
+    _, _, _, _, job = _scene_and_job(tmp_path, monkeypatch, "observe")
+    monkeypatch.setattr(
+        handlers,
+        "render_recipe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            BlenderRecipeError("render device unavailable: no GPU")
+        ),
+    )
+
+    with pytest.raises(JobExecutionError) as error:
+        handlers.observe(job)
+
+    assert error.value.code == "render_device_unavailable"
+    assert error.value.retryable is False
+
+
 def test_export_handler_builds_package_assets_blend_drake_and_zip(
     tmp_path, monkeypatch
 ):
@@ -85,3 +107,11 @@ def test_export_handler_builds_package_assets_blend_drake_and_zip(
         assert "package/compiled/blender/scene.blend" in names
         assert "package/compiled/drake/scene.dmd.yaml" in names
     assert result["size_bytes"] == archive.stat().st_size
+
+
+def test_export_zip_is_reproducible_across_job_ids(tmp_path, monkeypatch):
+    _, _, _, _, job = _scene_and_job(tmp_path, monkeypatch, "export")
+    monkeypatch.setattr(handlers, "render_recipe", _fake_render)
+    first = handlers.export(job)
+    second = handlers.export(replace(job, job_id="00000000-0000-0000-0000-000000000002"))
+    assert first["sha256"] == second["sha256"]

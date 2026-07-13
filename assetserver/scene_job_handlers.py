@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
@@ -13,11 +14,15 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from assetserver.asset_store import AssetStore
-from assetserver.blender_scene_worker import render_recipe
+from assetserver.asset_store import ContentAddressedAssetStore
+from assetserver.blender_scene_worker import BlenderRecipeError, render_recipe
 from assetserver.jobs import Job, JobExecutionError
-from assetserver.scene_compilers import blender_recipe, compile_drake_directives
-from assetserver.scene_ir import SceneIR, load_scene_yaml
+from assetserver.scene_compilers import SceneCompileError, blender_recipe, compile_drake_directives
+from assetserver.scene_ir import SceneIR, load_scene_yaml, scene_sha256
+
+
+RENDERER_VERSION = "scene-ir-eevee/v2"
+EXPORT_VERSION = "scene-export/v2"
 
 
 def observe(job: Job) -> dict[str, Any]:
@@ -27,22 +32,76 @@ def observe(job: Job) -> dict[str, Any]:
     temporary = _fresh_temporary(destination)
     try:
         recipe_path = temporary / "recipe.json"
-        recipe_path.write_bytes(blender_recipe(scene, assets))
+        try:
+            recipe_path.write_bytes(blender_recipe(scene, assets))
+        except SceneCompileError as exc:
+            raise JobExecutionError(str(exc), code="invalid_initial_joint", retryable=False) from exc
         options = job.request
         views, width, height, image_format = _render_options(options)
-        rendered = render_recipe(
-            recipe_path,
-            temporary,
-            views=views,
-            width=width,
-            height=height,
-            image_format=image_format,
-        )
+        asset_digests = sorted(assets.resolve(ref).digest for ref in scene.asset_refs())
+        cache_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "scene_sha": scene_sha256(scene),
+                    "asset_digests": asset_digests,
+                    "renderer_version": RENDERER_VERSION,
+                    "options": {
+                        "views": views,
+                        "width": width,
+                        "height": height,
+                        "format": image_format,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        cache = data_root / "observations" / "cache" / cache_key
+        if (cache / "rendered.json").is_file():
+            rendered = json.loads((cache / "rendered.json").read_text())
+            for item in rendered:
+                source = cache / Path(item["path"]).name
+                target = temporary / source.name
+                shutil.copy2(source, target)
+                item["path"] = str(target)
+        else:
+            try:
+                rendered = render_recipe(
+                    recipe_path,
+                    temporary,
+                    views=views,
+                    width=width,
+                    height=height,
+                    image_format=image_format,
+                )
+            except BlenderRecipeError as exc:
+                code = (
+                    "render_device_unavailable"
+                    if "render device" in str(exc).lower()
+                    else "blender_recipe_error"
+                )
+                raise JobExecutionError(str(exc), code=code, retryable=False) from exc
+            cache_tmp = _fresh_temporary(cache)
+            cached = []
+            for item in rendered:
+                source = Path(item["path"])
+                shutil.copy2(source, cache_tmp / source.name)
+                cached.append({**item, "path": source.name})
+            (cache_tmp / "rendered.json").write_text(json.dumps(cached, sort_keys=True) + "\n")
+            _publish(cache_tmp, cache)
         recipe_path.unlink()
         manifest = {
+            "schema_version": "observation/v2",
             "scene_id": job.scene_id,
             "scene_revision": job.scene_revision,
+            "scene_sha256": scene_sha256(scene),
             "observation_id": job.job_id,
+            "cache_key": cache_key,
+            "asset_digests": asset_digests,
+            "renderer_version": RENDERER_VERSION,
+            "blender_version": _blender_version(),
+            "render_device": next((item.get("device") for item in rendered if item.get("device")), "unknown"),
+            "options": {"views": views, "width": width, "height": height, "format": image_format},
             "views": [{**item, "path": Path(item["path"]).name} for item in rendered],
         }
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -84,48 +143,118 @@ def validate(job: Job) -> dict[str, Any]:
     parser = Parser(plant)
     parser.SetAutoRenaming(True)
     instances = []
+    issues: list[dict[str, Any]] = []
     specs = [
-        (f"room_{room.id}", room.shell.asset_ref, room.transform, "static", {})
+        (f"room_{room.id}", room.id, room.shell.asset_ref, room.transform, "static", {})
         for room in scene.rooms
     ] + [
-        (obj.id, obj.asset_ref, obj.transform, obj.mobility, obj.initial_joints)
+        (obj.id, obj.id, obj.asset_ref, obj.transform, obj.mobility, obj.initial_joints)
         for obj in scene.objects
     ]
     try:
-        for name, asset_ref, transform, mobility, joints in specs:
+        for name, object_id, asset_ref, transform, mobility, joints in specs:
+            stored = assets.resolve(asset_ref)
+            simulation = stored.manifest.get("simulation") or {}
             path = assets.entrypoint(asset_ref, "simulation")
-            loaded = parser.AddModels(str(path))
+            try:
+                loaded = parser.AddModels(str(path))
+            except Exception as exc:
+                issue_type = (
+                    "unsupported_collision"
+                    if "collision" in str(exc).lower()
+                    else "model_load"
+                )
+                issues.append(_issue(issue_type, "error", [object_id], str(exc), False))
+                return {"valid": False, "issues": issues, "model_count": len(instances)}
             if len(loaded) != 1:
-                raise JobExecutionError(
-                    f"{name} simulation entrypoint must contain exactly one model",
-                    code="invalid_simulation_asset",
+                issues.append(
+                    _issue(
+                        "model_load",
+                        "error",
+                        [object_id],
+                        "simulation entrypoint must contain exactly one model",
+                        False,
+                    )
                 )
+                return {"valid": False, "issues": issues, "model_count": len(instances)}
             model = loaded[0]
-            body_indices = plant.GetBodyIndices(model)
-            if not body_indices:
-                raise JobExecutionError(
-                    f"{name} contains no bodies", code="invalid_simulation_asset"
+            base_link = simulation.get("base_link")
+            try:
+                body = plant.GetBodyByName(base_link, model)
+            except Exception:
+                issues.append(
+                    _issue(
+                        "missing_base_link",
+                        "error",
+                        [object_id],
+                        f"declared base link does not exist: {base_link}",
+                        False,
+                    )
                 )
-            pose = _drake_pose(transform, RigidTransform, RollPitchYaw)
-            body = plant.get_body(body_indices[0])
+                return {"valid": False, "issues": issues, "model_count": len(instances)}
+            pose = _drake_pose(transform, RigidTransform, RollPitchYaw).multiply(
+                RigidTransform(simulation.get("transform_to_asset"))
+            )
             if mobility == "static":
                 plant.WeldFrames(plant.world_frame(), body.body_frame(), pose)
             for joint_name, position in joints.items():
+                declared = next(
+                    (item for item in stored.manifest.get("joints", []) if item.get("name") == joint_name),
+                    None,
+                )
+                if declared is None:
+                    issues.append(
+                        _issue(
+                            "unknown_joint",
+                            "error",
+                            [object_id],
+                            f"objects[{name}].initial_joints.{joint_name}: unknown joint",
+                            False,
+                            metric=position,
+                        )
+                    )
+                    continue
+                limits = declared.get("limits")
+                if limits and not limits["lower"] <= position <= limits["upper"]:
+                    issues.append(
+                        _issue(
+                            "limited_joint",
+                            "error",
+                            [object_id],
+                            f"objects[{name}].initial_joints.{joint_name}: outside declared limits",
+                            False,
+                            metric=position,
+                        )
+                    )
+                    continue
                 joint = plant.GetJointByName(joint_name, model)
                 if joint.num_positions() != 1:
-                    raise JobExecutionError(
-                        f"joint {joint_name} does not have one position",
-                        code="invalid_initial_joint",
+                    issues.append(
+                        _issue(
+                            "unsupported_joint",
+                            "error",
+                            [object_id],
+                            f"joint {joint_name} does not have one position",
+                            False,
+                        )
                     )
+                    continue
                 joint.set_default_positions([position])
-            instances.append((name, model, body, pose, mobility))
+            instances.append((name, object_id, model, body, pose, mobility))
+        if issues:
+            return {"valid": False, "issues": issues, "model_count": len(instances)}
         plant.Finalize()
         diagram = builder.Build()
         context = diagram.CreateDefaultContext()
         plant_context = plant.GetMyContextFromRoot(context)
-        for _, _, body, pose, mobility in instances:
+        for name, _, _, body, pose, mobility in instances:
             if mobility == "dynamic":
-                plant.SetFreeBodyPose(plant_context, body, pose)
+                try:
+                    plant.SetFreeBodyPose(plant_context, body, pose)
+                except Exception as exc:
+                    issues.append(
+                        _issue("free_body_initialization", "error", [name], str(exc), False)
+                    )
         query = scene_graph.get_query_output_port().Eval(
             scene_graph.GetMyContextFromRoot(context)
         )
@@ -134,17 +263,78 @@ def validate(job: Job) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise JobExecutionError(str(exc), code="drake_validation_failed") from exc
-    issues = [
-        {
-            "type": "penetration",
-            "depth": float(item.depth),
-            "geometry_a": str(item.id_A),
-            "geometry_b": str(item.id_B),
-        }
-        for item in penetrations
-        if float(item.depth) > 1e-6
-    ]
+    inspector = query.inspector()
+    model_objects = {
+        model: (object_id, mobility)
+        for _, object_id, model, _, _, mobility in instances
+    }
+    epsilon = float(job.request.get("penetration_epsilon", 1e-6))
+    include_static_static = bool(job.request.get("static_static", True))
+    support_tolerance = float(job.request.get("support_contact_tolerance", max(epsilon, 1e-4)))
+    placements = {
+        obj.id: obj.placement.parent_object_id for obj in scene.objects if obj.placement
+    }
+    for item in penetrations:
+        depth = float(item.depth)
+        if depth <= epsilon:
+            continue
+        try:
+            body_a = plant.GetBodyFromFrameId(inspector.GetFrameId(item.id_A))
+            body_b = plant.GetBodyFromFrameId(inspector.GetFrameId(item.id_B))
+            owner_a = model_objects.get(body_a.model_instance())
+            owner_b = model_objects.get(body_b.model_instance())
+        except Exception:
+            owner_a = owner_b = None
+        if owner_a is None or owner_b is None:
+            logging.getLogger(__name__).warning("unmapped Drake penetration geometry")
+            continue
+        name_a, mobility_a = owner_a
+        name_b, mobility_b = owner_b
+        if not include_static_static and mobility_a == mobility_b == "static":
+            continue
+        if (
+            (placements.get(name_a) == name_b or placements.get(name_b) == name_a)
+            and depth <= support_tolerance
+        ):
+            continue
+        if (
+            (name_a in {room.id for room in scene.rooms} or name_b in {room.id for room in scene.rooms})
+            and depth <= support_tolerance
+        ):
+            continue
+        issues.append(
+            _issue(
+                "penetration",
+                "error",
+                sorted([name_a, name_b]),
+                f"objects penetrate by {depth:.6g} m",
+                False,
+                depth=depth,
+                metric=depth,
+            )
+        )
     return {"valid": not issues, "issues": issues, "model_count": len(instances)}
+
+
+def _issue(
+    issue_type: str,
+    severity: str,
+    object_ids: list[str],
+    message: str,
+    retryable: bool,
+    *,
+    depth: float | None = None,
+    metric: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": issue_type,
+        "severity": severity,
+        "object_ids": object_ids,
+        "depth": depth,
+        "metric": metric,
+        "message": message,
+        "retryable": retryable,
+    }
 
 
 def export(job: Job) -> dict[str, Any]:
@@ -201,12 +391,34 @@ def export(job: Job) -> dict[str, Any]:
         )
         recipe_path.unlink()
         manifest = {
-            "schema_version": "scene-export/v1",
+            "schema_version": EXPORT_VERSION,
             "scene_id": job.scene_id,
             "scene_revision": job.scene_revision,
+            "scene_sha256": scene_sha256(scene),
+            "asset_digests": sorted(assets.resolve(ref).digest for ref in scene.asset_refs()),
             "assets": sorted(scene.asset_refs()),
+            "versions": {
+                "exporter": EXPORT_VERSION,
+                "renderer": RENDERER_VERSION,
+                "blender": _blender_version(),
+                "drake": _drake_version(),
+            },
+            "asset_tool_versions": {
+                assets.resolve(ref).digest: assets.resolve(ref).manifest.get(
+                    "tool_versions", {}
+                )
+                for ref in sorted(scene.asset_refs())
+            },
+            "parameters": {
+                "views": views,
+                "width": width,
+                "height": height,
+                "format": image_format,
+            },
         }
-        (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        (package / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
         checksum_lines = []
         for path in sorted(package.rglob("*")):
             if path.is_file():
@@ -214,6 +426,10 @@ def export(job: Job) -> dict[str, Any]:
                     f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(package).as_posix()}"
                 )
         (package / "checksums.sha256").write_text("\n".join(checksum_lines) + "\n")
+        _verify_package_checksums(package)
+        _scan_for_absolute_paths(package)
+        _validate_blend(package / "compiled" / "blender" / "scene.blend")
+        _validate_drake_package(package)
         archive = temporary / f"{job.scene_id}-r{job.scene_revision}.zip"
         _write_zip(package, archive)
         _publish(temporary, export_root)
@@ -230,7 +446,7 @@ def export(job: Job) -> dict[str, Any]:
     }
 
 
-def _load(job: Job, data_root: Path) -> tuple[SceneIR, AssetStore]:
+def _load(job: Job, data_root: Path) -> tuple[SceneIR, ContentAddressedAssetStore]:
     scene_path = (
         data_root
         / "scenes"
@@ -240,7 +456,9 @@ def _load(job: Job, data_root: Path) -> tuple[SceneIR, AssetStore]:
     )
     if not scene_path.is_file():
         raise JobExecutionError("scene revision not found", code="scene_not_found")
-    return load_scene_yaml(scene_path.read_bytes()), AssetStore(data_root / "assets")
+    return load_scene_yaml(scene_path.read_bytes()), ContentAddressedAssetStore(
+        data_root / "assets"
+    )
 
 
 def _roots() -> tuple[Path, Path]:
@@ -291,6 +509,91 @@ def _drake_pose(transform, rigid_transform, roll_pitch_yaw):
     return rigid_transform(roll_pitch_yaw(*angles), transform.translation)
 
 
+def _blender_version() -> str:
+    try:
+        import bpy
+
+        return str(bpy.app.version_string)
+    except ImportError:
+        return "unavailable"
+
+
+def _drake_version() -> str:
+    try:
+        import pydrake
+
+        return str(getattr(pydrake, "__version__", "installed"))
+    except ImportError:
+        return "unavailable"
+
+
+def _verify_package_checksums(package: Path) -> None:
+    for line in (package / "checksums.sha256").read_text().splitlines():
+        digest, relative = line.split("  ", 1)
+        path = package / relative
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise JobExecutionError(
+                f"export checksum verification failed: {relative}",
+                code="export_verification_failed",
+                retryable=False,
+            )
+
+
+def _scan_for_absolute_paths(package: Path) -> None:
+    forbidden = (b"file://", b"/home/", b"/app/", b"/data/", b"/outputs/")
+    for path in sorted(item for item in package.rglob("*") if item.is_file()):
+        content = path.read_bytes()
+        if any(value in content for value in forbidden):
+            raise JobExecutionError(
+                f"export contains an absolute path: {path.relative_to(package)}",
+                code="export_path_leak",
+                retryable=False,
+            )
+
+
+def _validate_blend(path: Path) -> None:
+    try:
+        import bpy
+    except ImportError:
+        return
+    try:
+        bpy.ops.wm.open_mainfile(filepath=str(path))
+    except Exception as exc:
+        raise JobExecutionError(
+            f"Blender reopen validation failed: {exc}",
+            code="export_blender_validation_failed",
+            retryable=False,
+        ) from exc
+
+
+def _validate_drake_package(package: Path) -> None:
+    try:
+        from pydrake.all import (
+            AddMultibodyPlantSceneGraph,
+            DiagramBuilder,
+            LoadModelDirectives,
+            Parser,
+            ProcessModelDirectives,
+        )
+    except ImportError:
+        return
+    try:
+        builder = DiagramBuilder()
+        plant, _ = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
+        parser = Parser(plant)
+        parser.package_map().Add("scene", str(package))
+        directives = package / "compiled" / "drake" / "scene.dmd.yaml"
+        loaded = LoadModelDirectives(str(directives))
+        ProcessModelDirectives(loaded, plant, parser)
+        plant.Finalize()
+    except Exception as exc:
+        raise JobExecutionError(
+            f"Drake package validation failed: {exc}",
+            code="export_drake_validation_failed",
+            retryable=False,
+        ) from exc
+
+
 def _fresh_temporary(destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     return Path(
@@ -312,4 +615,8 @@ def _write_zip(package: Path, archive: Path) -> None:
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
         for path in sorted(package.rglob("*")):
             if path.is_file():
-                output.write(path, Path("package") / path.relative_to(package))
+                name = (Path("package") / path.relative_to(package)).as_posix()
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.external_attr = 0o100644 << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                output.writestr(info, path.read_bytes())

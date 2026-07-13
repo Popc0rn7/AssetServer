@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import yaml
 
-from assetserver.asset_store import AssetStore
+from assetserver.asset_store import ContentAddressedAssetStore, IDENTITY_MATRIX
 from assetserver.scene_ir import SceneIR, Transform
 
 
@@ -33,19 +33,32 @@ _DrakeDumper.add_representer(
 
 def compile_drake_directives(
     scene: SceneIR,
-    assets: AssetStore,
+    assets: ContentAddressedAssetStore,
     *,
     uri_resolver: Callable[[str], str] | None = None,
 ) -> bytes:
     directives: list[dict] = []
     for room in scene.rooms:
         model_name = f"room_{room.id}"
-        uri, base_link = _simulation_spec(room.shell.asset_ref, assets, uri_resolver)
+        uri, base_link, asset_transform = _simulation_spec(
+            room.shell.asset_ref, assets, uri_resolver
+        )
         directives.extend(
-            _drake_instance(model_name, uri, base_link, room.transform, "static", {})
+            _drake_instance(
+                model_name,
+                uri,
+                base_link,
+                room.transform,
+                "static",
+                {},
+                asset_transform,
+            )
         )
     for obj in scene.objects:
-        uri, base_link = _simulation_spec(obj.asset_ref, assets, uri_resolver)
+        uri, base_link, asset_transform = _simulation_spec(
+            obj.asset_ref, assets, uri_resolver
+        )
+        _validate_initial_joints(obj.id, obj.asset_ref, obj.initial_joints, assets)
         directives.extend(
             _drake_instance(
                 obj.id,
@@ -54,6 +67,7 @@ def compile_drake_directives(
                 obj.transform,
                 obj.mobility,
                 obj.initial_joints,
+                asset_transform,
             )
         )
     return yaml.dump(
@@ -62,16 +76,21 @@ def compile_drake_directives(
 
 
 def _simulation_spec(
-    asset_ref: str, assets: AssetStore, resolver: Callable[[str], str] | None
-) -> tuple[str, str]:
+    asset_ref: str,
+    assets: ContentAddressedAssetStore,
+    resolver: Callable[[str], str] | None,
+) -> tuple[str, str, list[list[float]]]:
     stored = assets.resolve(asset_ref)
-    base_link = str(stored.manifest.get("metadata", {}).get("base_link", "base"))
+    simulation = stored.manifest.get("simulation") or {}
+    base_link = simulation.get("base_link")
+    if not isinstance(base_link, str) or not base_link:
+        raise SceneCompileError(f"asset has no declared simulation base link: {asset_ref}")
     uri = (
         resolver(asset_ref)
         if resolver is not None
         else f"file://{assets.entrypoint(asset_ref, 'simulation').resolve()}"
     )
-    return uri, base_link
+    return uri, base_link, simulation.get("transform_to_asset", IDENTITY_MATRIX)
 
 
 def _drake_instance(
@@ -81,6 +100,7 @@ def _drake_instance(
     transform: Transform,
     mobility: str,
     initial_joints: dict[str, float],
+    asset_transform: list[list[float]],
 ) -> list[dict]:
     model = {"name": name, "file": uri}
     if initial_joints:
@@ -88,10 +108,8 @@ def _drake_instance(
             joint: [position] for joint, position in initial_joints.items()
         }
     values: list[dict] = [{"add_model": model}]
-    pose = {
-        "translation": list(transform.translation),
-        "rotation": _Rpy(transform.rotation_rpy_degrees),
-    }
+    translation, rotation = _composed_pose(transform, asset_transform)
+    pose = {"translation": translation, "rotation": _Rpy(rotation)}
     if mobility == "static":
         values.append(
             {
@@ -109,18 +127,30 @@ def _drake_instance(
     return values
 
 
-def blender_recipe(scene: SceneIR, assets: AssetStore) -> bytes:
+def blender_recipe(scene: SceneIR, assets: ContentAddressedAssetStore) -> bytes:
     """Create a transport-neutral recipe consumed by the bpy viewer worker."""
     instances = []
     for room in scene.rooms:
         instances.append(
             _blender_instance(
-                f"room_{room.id}", room.shell.asset_ref, room.transform, assets, 1.0
+                f"room_{room.id}",
+                room.shell.asset_ref,
+                room.transform,
+                assets,
+                1.0,
+                {},
             )
         )
     for obj in scene.objects:
         instances.append(
-            _blender_instance(obj.id, obj.asset_ref, obj.transform, assets, obj.scale)
+            _blender_instance(
+                obj.id,
+                obj.asset_ref,
+                obj.transform,
+                assets,
+                obj.scale,
+                obj.initial_joints,
+            )
         )
     return (
         json.dumps(
@@ -131,13 +161,105 @@ def blender_recipe(scene: SceneIR, assets: AssetStore) -> bytes:
 
 
 def _blender_instance(
-    name: str, asset_ref: str, transform: Transform, assets: AssetStore, scale: float
+    name: str,
+    asset_ref: str,
+    transform: Transform,
+    assets: ContentAddressedAssetStore,
+    scale: float,
+    initial_joints: dict[str, float],
 ) -> dict:
+    stored = assets.resolve(asset_ref)
     visual = assets.entrypoint(asset_ref, "visual")
-    return {
+    visual_spec = stored.manifest["visual"]
+    _validate_initial_joints(name, asset_ref, initial_joints, assets)
+    parts = []
+    for part in visual_spec.get("parts") or []:
+        parts.append(
+            {
+                "link": part["link"],
+                "visual": str(
+                    assets.file_path(stored.root, part["entrypoint"]).resolve()
+                ),
+            }
+        )
+    instance = {
         "name": name,
         "visual": str(visual.resolve()),
         "translation": list(transform.translation),
         "rotation_radians": [math.radians(v) for v in transform.rotation_rpy_degrees],
         "scale": scale,
+        "asset_transform": visual_spec.get("transform_to_asset", IDENTITY_MATRIX),
+        "initial_joints": initial_joints,
+        "bounds": stored.manifest.get("bounds"),
+        "materials": visual_spec.get("materials", []),
     }
+    if parts:
+        simulation = stored.manifest.get("simulation") or {}
+        instance["visual_parts"] = parts
+        instance["simulation"] = str(
+            assets.entrypoint(asset_ref, "simulation").resolve()
+        )
+        instance["base_link"] = simulation["base_link"]
+    return instance
+
+
+def _validate_initial_joints(
+    object_id: str,
+    asset_ref: str,
+    positions: dict[str, float],
+    assets: ContentAddressedAssetStore,
+) -> None:
+    if not positions:
+        return
+    declared = {
+        item.get("name"): item for item in assets.resolve(asset_ref).manifest.get("joints", [])
+    }
+    for name, position in positions.items():
+        field = f"objects[{object_id}].initial_joints.{name}"
+        if name not in declared:
+            raise SceneCompileError(
+                f"{field}: joint is not declared by asset {asset_ref}"
+            )
+        limits = declared[name].get("limits")
+        if limits and not limits["lower"] <= position <= limits["upper"]:
+            raise SceneCompileError(
+                f"{field}: {position} is outside [{limits['lower']}, {limits['upper']}]"
+            )
+
+
+def _composed_pose(
+    transform: Transform, asset_transform: list[list[float]]
+) -> tuple[list[float], list[float]]:
+    scene_matrix = _pose_matrix(transform)
+    matrix = _matmul(scene_matrix, asset_transform)
+    translation = [matrix[index][3] for index in range(3)]
+    # XYZ fixed-axis RPY extraction, matching Drake's RollPitchYaw convention.
+    pitch = math.asin(max(-1.0, min(1.0, -matrix[2][0])))
+    if abs(math.cos(pitch)) > 1e-8:
+        roll = math.atan2(matrix[2][1], matrix[2][2])
+        yaw = math.atan2(matrix[1][0], matrix[0][0])
+    else:
+        roll = math.atan2(-matrix[1][2], matrix[1][1])
+        yaw = 0.0
+    return translation, [math.degrees(value) for value in (roll, pitch, yaw)]
+
+
+def _pose_matrix(transform: Transform) -> list[list[float]]:
+    roll, pitch, yaw = [math.radians(v) for v in transform.rotation_rpy_degrees]
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    matrix = [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr, transform.translation[0]],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr, transform.translation[1]],
+        [-sp, cp * sr, cp * cr, transform.translation[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return matrix
+
+
+def _matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
+    return [
+        [sum(a[row][k] * b[k][column] for k in range(4)) for column in range(4)]
+        for row in range(4)
+    ]
