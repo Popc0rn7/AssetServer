@@ -1,0 +1,8 @@
+type: openclip_http
+server:
+  host: 127.0.0.1
+  port: 7006
+model: ViT-H-14-378-quickgelu
+revision: dfn5b
+dimension: 1024
+timeout_s: 30

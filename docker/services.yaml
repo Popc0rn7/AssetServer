@@ -5,8 +5,9 @@ services:
     image_env: ASSETSERVER_SAM3D_IMAGE
     container: assetserver-sam3d
     gpu: true
-    port: "127.0.0.1:7000:7000"
-    ready_url: http://127.0.0.1:7000/health/ready
+    backend_config: config/generate/sam3d.yaml
+    container_port: 7000
+    ready_path: /health/ready
     ready_timeout_s: 900
     model_host: checkpoints
     model_container: /models
@@ -29,8 +30,9 @@ services:
     image_env: ASSETSERVER_OPENCLIP_IMAGE
     container: assetserver-openclip
     gpu: true
-    port: "127.0.0.1:7006:7006"
-    ready_url: http://127.0.0.1:7006/health/ready
+    backend_config: config/openclip.yaml
+    container_port: 7006
+    ready_path: /health/ready
     ready_timeout_s: 300
     model_host: checkpoints/open_clip
     model_container: /models
@@ -48,8 +50,9 @@ services:
     image_env: ASSETSERVER_HUNYUAN3D_IMAGE
     container: assetserver-hunyuan3d
     gpu: true
-    port: "127.0.0.1:7002:7002"
-    ready_url: http://127.0.0.1:7002/health
+    backend_config: config/generate/hunyuan3d.yaml
+    container_port: 7002
+    ready_path: /health
     ready_timeout_s: 900
     model_host: checkpoints
     model_container: /models

@@ -1,7 +1,7 @@
 """Configuration loading for AssetServer.
 
-The main server config lives in ``config/server.yaml``. Backend/tool configs live
-under ``config/backend/*.yaml`` and are discovered automatically.
+The main server config lives in ``config/server.yaml``. Backend configs live
+under the directories listed by ``backend`` and are discovered automatically.
 """
 
 from dataclasses import dataclass
@@ -17,7 +17,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 7010,
+        "storage": {
+            "data_root": "data",
+            "output_root": "outputs",
+        },
+        "scenes": {
+            "legacy_sdf_api_enabled": False,
+            "scene_ir_api_enabled": True,
+            "renderer_url": None,
+        },
+        "jobs": {
+            "max_attempts": 3,
+        },
     },
+    "openclip": "config/openclip.yaml",
     "runtime": {
         "convex_decomposition": {
             "enabled": True,
@@ -36,7 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "timeout_s": 300,
         },
     },
-    "tool_dirs": [
+    "backend": [
         "config/generate",
         "config/retrieve",
     ],
@@ -74,18 +87,13 @@ def default_config_path() -> Path:
 
 def load_assetserver_config(
     config_path: str | Path | None = None,
-    backend_dir: str | Path | None = None,
 ) -> DictConfig:
-    """Load server config and automatically merge backend YAML declarations.
+    """Load server config and merge discovered backend YAML declarations.
 
     Merge order:
     1. Built-in defaults.
     2. ``config/server.yaml``.
-    3. Discovered ``config/backend/*.yaml`` entries.
-    4. Inline ``backends`` entries from ``server.yaml`` override discovered files.
-
-    This lets users add a backend by dropping in a YAML file, while still allowing
-    environment-specific overrides in the main server config.
+    3. YAML entries discovered from the directories in ``backend``.
     """
     register_resolvers()
 
@@ -95,17 +103,17 @@ def load_assetserver_config(
 
     base_cfg = OmegaConf.create(DEFAULT_CONFIG)
     file_cfg = _load_yaml_or_empty(path)
-    inline_backends = OmegaConf.create(file_cfg.get("backends", {}))
     cfg = OmegaConf.merge(base_cfg, file_cfg)
+    cfg.openclip = _load_referenced_config(cfg.openclip)
 
-    backend_paths = _resolve_backend_paths(cfg=cfg, backend_dir=backend_dir)
+    backend_paths = _resolve_backend_paths(cfg)
     discovered_backends = OmegaConf.create({})
     for backend_path in backend_paths:
         discovered_backends = OmegaConf.merge(
             discovered_backends, _load_backend_configs(backend_path)
         )
-    cfg.backends = OmegaConf.merge(discovered_backends, inline_backends)
-    cfg.tool_dirs = [str(path) for path in backend_paths]
+    cfg.backends = discovered_backends
+    cfg.backend = [str(path) for path in backend_paths]
     cfg.config_path = str(path)
     return cfg
 
@@ -142,12 +150,19 @@ def _load_yaml_or_empty(path: Path) -> DictConfig:
     return loaded
 
 
-def _load_backend_configs(backend_dir: Path) -> DictConfig:
+def _load_referenced_config(value: str | Path) -> DictConfig:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = project_root() / path
+    return _load_yaml_or_empty(path)
+
+
+def _load_backend_configs(config_dir: Path) -> DictConfig:
     discovered = OmegaConf.create({})
-    if not backend_dir.exists():
+    if not config_dir.exists():
         return discovered
 
-    for backend_file in sorted(backend_dir.glob("*.yaml")):
+    for backend_file in sorted(config_dir.glob("*.yaml")):
         backend_cfg = _load_yaml_or_empty(backend_file)
         if not backend_cfg:
             continue
@@ -158,18 +173,9 @@ def _load_backend_configs(backend_dir: Path) -> DictConfig:
     return discovered
 
 
-def _resolve_backend_paths(
-    cfg: DictConfig, backend_dir: str | Path | None
-) -> list[Path]:
-    if backend_dir is not None:
-        values = [backend_dir]
-    elif "backend_dir" in cfg:
-        values = [cfg.backend_dir]
-    else:
-        values = list(cfg.tool_dirs)
-
+def _resolve_backend_paths(cfg: DictConfig) -> list[Path]:
     paths: list[Path] = []
-    for value in values:
+    for value in cfg.backend:
         path = Path(str(value))
         if not path.is_absolute():
             path = project_root() / path

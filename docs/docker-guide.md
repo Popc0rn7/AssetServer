@@ -21,6 +21,12 @@ scripts/
 `scripts/docker_service.sh` is the only build and lifecycle interface. The
 Python helper is an implementation detail which reads `docker/services.yaml`.
 
+For managed HTTP backends, the host address is owned by the backend YAML. SAM3D,
+Hunyuan3D, and OpenCLIP read `server.host` and `server.port` from their respective
+files under `config/`; `docker/services.yaml` keeps only the fixed container port
+and readiness path. The lifecycle helper derives both the Docker port mapping
+and readiness URL, so changing a backend port requires one edit.
+
 ## Stage graph
 
 ```text

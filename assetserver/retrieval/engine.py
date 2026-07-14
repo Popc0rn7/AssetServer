@@ -39,7 +39,13 @@ class OpenCLIPClient:
 
 
 class RetrievalEngine:
-    def __init__(self, *, sources: dict[str, Any], embedding_client: OpenCLIPClient, cache_root: str | Path) -> None:
+    def __init__(
+        self,
+        *,
+        sources: dict[str, Any],
+        embedding_client: OpenCLIPClient,
+        cache_root: str | Path,
+    ) -> None:
         self.sources = sources
         self.embedding_client = embedding_client
         self._default_cache_root = Path(cache_root)
@@ -47,8 +53,7 @@ class RetrievalEngine:
 
     @classmethod
     def from_config(cls, config: Any) -> "RetrievalEngine | None":
-        providers = _as_dict(config.get("embedding_providers", {}))
-        openclip = providers.get("openclip")
+        openclip = _as_dict(config.get("openclip", {}))
         if not openclip:
             return None
         sources: dict[str, Any] = {}
@@ -60,20 +65,27 @@ class RetrievalEngine:
                 raw = _as_dict(spec.config)
                 delivery = _as_dict(raw.get("delivery", {}))
                 cache_roots[spec.name] = _resolve(
-                    delivery.get("cache_dir", f".cache/assetserver/retrieve/{spec.name}")
+                    delivery.get(
+                        "cache_dir", f".cache/assetserver/retrieve/{spec.name}"
+                    )
                 )
         if not sources:
             return None
+        openclip_server = _as_dict(openclip.get("server", {}))
+        openclip_host = str(openclip_server.get("host", "127.0.0.1"))
+        openclip_port = int(openclip_server.get("port", 7006))
         cache_root = project_root() / ".cache/assetserver/retrieve"
         engine = cls(
             sources=sources,
             embedding_client=OpenCLIPClient(
-                str(openclip.get("base_url", "http://127.0.0.1:7006")),
+                f"http://{openclip_host}:{openclip_port}",
                 float(openclip.get("timeout_s", 30)),
             ),
             cache_root=cache_root,
         )
-        engine.catalogs = {name: AssetCatalog(path) for name, path in cache_roots.items()}
+        engine.catalogs = {
+            name: AssetCatalog(path) for name, path in cache_roots.items()
+        }
         return engine
 
     async def retrieve(self, source_name: str, request: dict) -> dict:
@@ -133,7 +145,9 @@ class RetrievalEngine:
         if descriptor is None or descriptor.source != source_name:
             raise KeyError(candidate_id)
         files = {
-            path.resolve().relative_to(descriptor.root.resolve()).as_posix(): path.read_bytes()
+            path.resolve()
+            .relative_to(descriptor.root.resolve())
+            .as_posix(): path.read_bytes()
             for path in descriptor.files
         }
         for relative, source in descriptor.file_aliases:
@@ -258,7 +272,8 @@ def _source_factory_from_spec(spec: BackendSpec):
     dataset = _as_dict(raw.get("dataset", {}))
     if spec.type == "materials":
         return lambda: MaterialsSource(
-            data_root=_resolve(dataset["root"]), embeddings_root=_resolve(dataset["embeddings"])
+            data_root=_resolve(dataset["root"]),
+            embeddings_root=_resolve(dataset["embeddings"]),
         )
     if spec.type == "articulated":
         source_configs = _as_dict(raw.get("sources", {}))

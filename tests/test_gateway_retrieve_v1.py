@@ -40,13 +40,14 @@ class FakeRetrievalEngine:
 def retrieve_app(tmp_path):
     archive = tmp_path / "asset.zip"
     archive.write_bytes(b"PK\x03\x04archive")
-    config = OmegaConf.create({
-        "gateway": {"request_timeout_s": 30, "rate_limit": {"enabled": False}},
-        "docker": {"launch_backend": False},
-        "runtime": {},
-        "tool_dirs": [],
-        "backends": {},
-    })
+    config = OmegaConf.create(
+        {
+            "server": {},
+            "runtime": {},
+            "backend": [],
+            "backends": {},
+        }
+    )
     return AssetAcquisitionApp(
         config=config, retrieval_engine=FakeRetrievalEngine(archive)
     ).app
@@ -62,7 +63,9 @@ async def test_gateway_retrieve_returns_candidate_metadata(retrieve_app):
         )
 
     assert response.status_code == 200
-    assert response.json()["results"][0]["download_url"] == "/v1/assets/materials/asset-1"
+    assert (
+        response.json()["results"][0]["download_url"] == "/v1/assets/materials/asset-1"
+    )
 
 
 @pytest.mark.asyncio
@@ -80,7 +83,9 @@ async def test_gateway_retrieve_can_return_single_asset_zip(retrieve_app):
 
 
 @pytest.mark.asyncio
-async def test_gateway_retrieve_rejects_direct_download_of_multiple_candidates(retrieve_app):
+async def test_gateway_retrieve_rejects_direct_download_of_multiple_candidates(
+    retrieve_app,
+):
     transport = httpx.ASGITransport(app=retrieve_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
@@ -126,9 +131,7 @@ def test_gateway_tools_advertises_only_v1_retrieve_routes(tmp_path):
     archive = tmp_path / "asset.zip"
     archive.write_bytes(b"zip")
     server = AssetAcquisitionApp(
-        config=OmegaConf.create(
-            {"gateway": {}, "docker": {"launch_backend": False}, "backends": {}}
-        ),
+        config=OmegaConf.create({"server": {}, "backends": {}}),
         retrieval_engine=FakeRetrievalEngine(archive),
     )
 

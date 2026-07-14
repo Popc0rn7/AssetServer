@@ -45,10 +45,8 @@ def scene_client(tmp_path):
     renderer = FakeRenderer()
     config = OmegaConf.create(
         {
-            "gateway": {"rate_limit": {"enabled": False}},
-            "docker": {"launch_backend": False},
-            "runtime": {"scene_server": {"enabled": True}},
-            "tool_dirs": [],
+            "server": {"scenes": {"legacy_sdf_api_enabled": True}},
+            "backend": [],
             "backends": {},
         }
     )
@@ -151,9 +149,7 @@ def test_tools_advertises_scene_routes_when_enabled(tmp_path):
     server = AssetAcquisitionApp(
         config=OmegaConf.create(
             {
-                "gateway": {},
-                "docker": {"launch_backend": False},
-                "runtime": {"scene_server": {"enabled": True}},
+                "server": {"scenes": {"legacy_sdf_api_enabled": True}},
                 "backends": {},
             }
         ),
@@ -169,13 +165,9 @@ def test_scene_store_is_created_from_runtime_config(tmp_path):
     server = AssetAcquisitionApp(
         config=OmegaConf.create(
             {
-                "gateway": {},
-                "docker": {"launch_backend": False},
-                "runtime": {
-                    "scene_server": {
-                        "enabled": True,
-                        "root": str(tmp_path / "configured-scenes"),
-                    }
+                "server": {
+                    "storage": {"data_root": str(tmp_path / "configured-data")},
+                    "scenes": {"legacy_sdf_api_enabled": True},
                 },
                 "backends": {},
             }
@@ -184,16 +176,14 @@ def test_scene_store_is_created_from_runtime_config(tmp_path):
     )
 
     assert "/v1/scenes" in server.app.openapi()["paths"]
-    assert (tmp_path / "configured-scenes").is_dir()
+    assert (tmp_path / "configured-data" / "scenes").is_dir()
 
 
 @pytest.mark.asyncio
 async def test_scene_render_reports_unconfigured_renderer(tmp_path):
     config = OmegaConf.create(
         {
-            "gateway": {},
-            "docker": {"launch_backend": False},
-            "runtime": {"scene_server": {"enabled": True}},
+            "server": {"scenes": {"legacy_sdf_api_enabled": True}},
             "backends": {},
         }
     )

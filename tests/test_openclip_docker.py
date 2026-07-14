@@ -27,6 +27,11 @@ def test_openclip_runtime_has_no_shared_data_mount():
     assert service["model_container"] == "/models"
     assert service["cache_volume"] == "openclip-cache"
     assert "cache_host" not in service
+    assert service["backend_config"] == "config/openclip.yaml"
+    assert service["container_port"] == 7006
+    assert service["ready_path"] == "/health/ready"
+    assert "port" not in service
+    assert "ready_url" not in service
 
 
 def test_openclip_downloader_creates_flat_offline_bundle_without_torch_validation():

@@ -9,7 +9,7 @@ from assetserver.asset_acquisition_server.server_app import (
 def test_gateway_exposes_backend_specific_sam3d_routes():
     config = OmegaConf.create(
         {
-            "gateway": {},
+            "server": {},
             "docker": {"launch_backend": False},
             "runtime": {},
             "backends": {},

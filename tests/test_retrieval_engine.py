@@ -16,7 +16,9 @@ def _write_material_dataset(root: Path) -> tuple[Path, Path]:
     embeddings = data / "embeddings"
     embeddings.mkdir(parents=True)
     np.save(embeddings / "clip_embeddings.npy", np.array([[1.0, 0.0], [0.0, 1.0]]))
-    (embeddings / "embedding_index.yaml").write_text(yaml.safe_dump(["Wood001", "Metal001"]))
+    (embeddings / "embedding_index.yaml").write_text(
+        yaml.safe_dump(["Wood001", "Metal001"])
+    )
     (embeddings / "metadata_index.yaml").write_text(
         yaml.safe_dump(
             {
@@ -135,7 +137,9 @@ def test_retrieval_engine_returns_gateway_asset_urls(tmp_path):
             return np.array([1.0, 0.0])
 
     engine = RetrievalEngine(
-        sources={"materials": MaterialsSource(data_root=data, embeddings_root=embeddings)},
+        sources={
+            "materials": MaterialsSource(data_root=data, embeddings_root=embeddings)
+        },
         embedding_client=Embeddings(),
         cache_root=tmp_path / "cache",
     )
@@ -149,14 +153,16 @@ def test_retrieval_engine_returns_gateway_asset_urls(tmp_path):
     assert result["results"][0]["download_url"].startswith("/v1/assets/materials/")
 
 
-def test_configured_delivery_cache_is_used_without_loading_source_at_startup(tmp_path, monkeypatch):
+def test_configured_delivery_cache_is_used_without_loading_source_at_startup(
+    tmp_path, monkeypatch
+):
     from omegaconf import OmegaConf
 
     data, embeddings = _write_material_dataset(tmp_path)
     monkeypatch.setattr("assetserver.retrieval.engine.project_root", lambda: tmp_path)
     config = OmegaConf.create(
         {
-            "embedding_providers": {"openclip": {"base_url": "http://openclip"}},
+            "openclip": {"server": {"host": "openclip", "port": 7006}},
             "backends": {
                 "materials": {
                     "name": "materials",
@@ -172,5 +178,6 @@ def test_configured_delivery_cache_is_used_without_loading_source_at_startup(tmp
 
     engine = RetrievalEngine.from_config(config)
 
+    assert engine.embedding_client.base_url == "http://openclip:7006"
     assert callable(engine.sources["materials"])
     assert engine.catalogs["materials"].cache_root == tmp_path / "derived/materials"

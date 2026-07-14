@@ -25,7 +25,41 @@ VERSIONS_PATH = ROOT / "docker" / "versions.env"
 
 def _registry() -> dict[str, dict[str, Any]]:
     raw = yaml.safe_load(REGISTRY_PATH.read_text()) or {}
-    return dict(raw.get("services") or {})
+    return {
+        name: _resolve_service(name, dict(service))
+        for name, service in dict(raw.get("services") or {}).items()
+    }
+
+
+def _resolve_service(name: str, service: dict[str, Any]) -> dict[str, Any]:
+    """Resolve host endpoint settings shared with an AssetServer backend."""
+    config_value = service.get("backend_config")
+    if not config_value:
+        return service
+
+    config_path = (ROOT / str(config_value)).resolve()
+    if not config_path.is_file():
+        raise SystemExit(f"{name}: backend config not found: {config_path}")
+    backend = yaml.safe_load(config_path.read_text()) or {}
+    endpoint = dict(backend.get("server") or {})
+    host = endpoint.get("host")
+    port = endpoint.get("port")
+    if not isinstance(host, str) or not host.strip():
+        raise SystemExit(f"{name}: backend config requires server.host")
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise SystemExit(f"{name}: backend config requires a valid server.port")
+
+    container_port = service.get("container_port")
+    if not isinstance(container_port, int) or not 1 <= container_port <= 65535:
+        raise SystemExit(f"{name}: service requires a valid container_port")
+    service["port"] = f"{host}:{port}:{container_port}"
+
+    ready_path = service.get("ready_path")
+    if ready_path is not None:
+        if not isinstance(ready_path, str) or not ready_path.startswith("/"):
+            raise SystemExit(f"{name}: ready_path must start with '/'")
+        service["ready_url"] = f"http://{host}:{port}{ready_path}"
+    return service
 
 
 def _versions() -> dict[str, str]:
@@ -62,7 +96,9 @@ def _gpu_architecture() -> str:
             text=True,
             check=False,
         )
-        values = sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+        values = sorted(
+            {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        )
         if values:
             return ";".join(values)
     raise SystemExit("Cannot detect GPU architecture; set TORCH_CUDA_ARCH_LIST.")
@@ -206,7 +242,10 @@ def run_service(name: str, service: dict[str, Any], args: argparse.Namespace) ->
     model_host = service.get("model_host")
     if model_host:
         command.extend(
-            ["-v", f"{(ROOT / str(model_host)).resolve()}:{service['model_container']}:ro"]
+            [
+                "-v",
+                f"{(ROOT / str(model_host)).resolve()}:{service['model_container']}:ro",
+            ]
         )
     data_policy = service.get("data")
     if data_policy:

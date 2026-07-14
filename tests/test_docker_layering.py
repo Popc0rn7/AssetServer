@@ -43,9 +43,9 @@ def test_hunyuan_reuses_torch_base_and_copies_source_last():
 
     assert "uv sync --active --frozen" in hunyuan
     assert "--no-install-project" in hunyuan
-    assert hunyuan.index("RUN bash scripts/install_hunyuan3d_docker.sh") < hunyuan.index(
-        "COPY assetserver/__init__.py"
-    )
+    assert hunyuan.index(
+        "RUN bash scripts/install_hunyuan3d_docker.sh"
+    ) < hunyuan.index("COPY assetserver/__init__.py")
 
 
 def test_sam3d_runtime_contains_its_lazy_pipeline_dependencies():
@@ -71,6 +71,23 @@ def test_registry_is_the_only_runtime_container_source():
     }
     assert all(item["image"].startswith("assetserver/") for item in registry.values())
     assert not Path("scripts/run_backend_docker.py").exists()
+
+
+def test_http_service_host_ports_come_from_backend_configs():
+    registry = yaml.safe_load(Path("docker/services.yaml").read_text())["services"]
+
+    expected = {
+        "sam3d": ("config/generate/sam3d.yaml", 7000, "/health/ready"),
+        "openclip": ("config/openclip.yaml", 7006, "/health/ready"),
+        "hunyuan3d": ("config/generate/hunyuan3d.yaml", 7002, "/health"),
+    }
+    for name, (config, container_port, ready_path) in expected.items():
+        service = registry[name]
+        assert service["backend_config"] == config
+        assert service["container_port"] == container_port
+        assert service["ready_path"] == ready_path
+        assert "port" not in service
+        assert "ready_url" not in service
 
 
 def test_gateway_and_local_retrieval_have_no_container_definition():

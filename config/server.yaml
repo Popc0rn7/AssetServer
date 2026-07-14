@@ -1,41 +1,22 @@
 server:
   host: 127.0.0.1
   port: 7010
+  storage:
+    data_root: ${oc.env:ASSETSERVER_DATA_ROOT,data}
+    output_root: ${oc.env:ASSETSERVER_OUTPUT_ROOT,outputs}
+  scenes:
+    legacy_sdf_api_enabled: false
+    scene_ir_api_enabled: true
+    renderer_url: ${oc.env:ASSETSERVER_RENDERER_URL,null}
+  jobs:
+    max_attempts: 3
 
-gateway:
-  request_timeout_s: 3600
-  history_max_entries: 500
-  api_key: ${oc.env:ASSETSERVER_API_KEY,null}
-  rate_limit:
-    enabled: false
-    max_requests_per_minute: 60
-
-embedding_providers:
-  openclip:
-    type: openclip_http
-    base_url: ${oc.env:ASSETSERVER_OPENCLIP_URL,http://127.0.0.1:7006}
-    model: ViT-H-14-378-quickgelu
-    revision: dfn5b
-    dimension: 1024
-    timeout_s: 30
+openclip: config/openclip.yaml
 
 # Persistent runtime services are part of AssetServer itself. They are configured
 # here because most pipelines depend on them and they are not treated as
 # replaceable generation/retrieval sources.
 runtime:
-  scene_server:
-    enabled: false
-    ir_enabled: ${oc.env:ASSETSERVER_SCENE_IR_ENABLED,true}
-    data_root: ${oc.env:ASSETSERVER_DATA_ROOT,data}
-    output_root: ${oc.env:ASSETSERVER_OUTPUT_ROOT,outputs}
-    job_max_attempts: 3
-    job_lease_seconds: 300
-    job_heartbeat_seconds: 30
-    root: ${oc.env:ASSETSERVER_SCENE_ROOT,data/scenes}
-    renderer_url: ${oc.env:ASSETSERVER_RENDERER_URL,null}
-    render_timeout_s: 300
-    max_sdf_bytes: 10485760
-    max_package_bytes: 2147483648
   convex_decomposition:
     enabled: false
     host: 127.0.0.1
@@ -51,20 +32,8 @@ runtime:
     collision_method: coacd
     timeout_s: 300
 
-# Replaceable tool declarations are loaded from these directories. Add a new YAML
-# file under config/generate or config/retrieve to make a backend discoverable
-# without changing Python code.
-tool_dirs:
+# Backend declarations are loaded from these directories. Each backend YAML owns
+# its complete configuration, including whether it is enabled.
+backend:
   - config/generate
   - config/retrieve
-
-# P1 validation profile. These declarations override only ``enabled`` while the
-# complete backend definitions continue to come from config/generate and
-# config/retrieve.
-backends:
-  sam3d:
-    enabled: true
-  articulated:
-    enabled: true
-  materials:
-    enabled: true

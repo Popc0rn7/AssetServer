@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 import uuid
 import hashlib
@@ -65,6 +64,12 @@ HOP_BY_HOP_HEADERS = {
     "host",
     "content-length",
 }
+
+HISTORY_MAX_ENTRIES = 500
+UPSTREAM_TIMEOUT_S = 3600.0
+SCENE_RENDER_TIMEOUT_S = 300.0
+SCENE_MAX_SDF_BYTES = 10 * 1024**2
+SCENE_MAX_PACKAGE_BYTES = 2 * 1024**3
 
 
 def _dimensions(metadata: dict[str, Any]) -> list[float] | None:
@@ -154,38 +159,37 @@ class AssetAcquisitionApp:
             retrieval_engine = RetrievalEngine.from_config(config)
         self._retrieval_engine = retrieval_engine
         scene_config = self._scene_config()
-        if scene_store is None and scene_config.get("enabled", False):
+        storage_config = self._storage_config()
+        data_root = Path(storage_config.get("data_root", "data"))
+        output_root = Path(storage_config.get("output_root", "outputs"))
+        if scene_store is None and scene_config.get("legacy_sdf_api_enabled", False):
             scene_store = SceneStore(
-                scene_config.get("root", "data/scenes"),
-                max_package_bytes=int(
-                    scene_config.get("max_package_bytes", 2 * 1024**3)
-                ),
-                max_sdf_bytes=int(scene_config.get("max_sdf_bytes", 10 * 1024**2)),
+                data_root / "scenes",
+                max_package_bytes=SCENE_MAX_PACKAGE_BYTES,
+                max_sdf_bytes=SCENE_MAX_SDF_BYTES,
             )
         if scene_renderer is None and scene_store is not None:
             renderer_url = scene_config.get("renderer_url")
             if renderer_url:
                 scene_renderer = SceneRendererClient(
                     renderer_url,
-                    timeout_s=float(scene_config.get("render_timeout_s", 300)),
+                    timeout_s=SCENE_RENDER_TIMEOUT_S,
                 )
         self._scene_store = scene_store
         self._scene_renderer = scene_renderer
-        data_root = Path(scene_config.get("data_root", "data"))
-        output_root = Path(scene_config.get("output_root", "outputs"))
         self._scene_data_root = data_root
         self._scene_output_root = output_root
         self._advertise_v2_assets = bool(
             asset_store is not None
             or ir_scene_store is not None
-            or scene_config.get("ir_enabled", False)
+            or scene_config.get("scene_ir_api_enabled", False)
         )
         self._asset_store = (
             asset_store
             or (ir_scene_store.asset_store if ir_scene_store is not None else None)
             or ContentAddressedAssetStore(data_root / "assets")
         )
-        if ir_scene_store is None and scene_config.get("ir_enabled", False):
+        if ir_scene_store is None and scene_config.get("scene_ir_api_enabled", False):
             ir_scene_store = IRSceneStore(
                 data_root / "scenes", ContentAddressedAssetStore(data_root / "assets")
             )
@@ -193,11 +197,8 @@ class AssetAcquisitionApp:
         if job_store is None and ir_scene_store is not None and config is not None:
             job_store = SQLiteJobStore(data_root / "jobs" / "jobs.sqlite3")
         self._job_store = job_store
-        self._history: deque[GatewayHistoryEntry] = deque(
-            maxlen=self._gateway_int("history_max_entries", 500)
-        )
-        self._rate_window: dict[str, deque[float]] = {}
-        self.app = FastAPI(title="AssetServer Gateway")
+        self._history: deque[GatewayHistoryEntry] = deque(maxlen=HISTORY_MAX_ENTRIES)
+        self.app = FastAPI(title="AssetServer")
         self._register_routes()
 
     async def __call__(self, scope, receive, send):
@@ -244,7 +245,9 @@ class AssetAcquisitionApp:
             "/v2/assets/{digest}", self._asset_v2_endpoint, methods=["GET"]
         )
         self.app.add_api_route(
-            "/v2/assets/{digest}/preview", self._asset_preview_v2_endpoint, methods=["GET"]
+            "/v2/assets/{digest}/preview",
+            self._asset_preview_v2_endpoint,
+            methods=["GET"],
         )
         self.app.add_api_route(
             "/v1/assets/{source}/{asset_id}",
@@ -331,10 +334,10 @@ class AssetAcquisitionApp:
     def _health_endpoint(self) -> dict[str, Any]:
         return {
             "status": "healthy",
-            "mode": "gateway",
+            "mode": "server",
             "handler_configured": self._generate_assets_handler is not None,
             "enabled_backends": len(self._enabled_backend_specs()),
-            "gateway": self._gateway_config(),
+            "server": self._server_config(),
             "runtime": self._runtime_config(),
         }
 
@@ -424,7 +427,6 @@ class AssetAcquisitionApp:
     async def _submit_ir_job_endpoint(
         self, scene_id: str, request: Request, job_type: str
     ) -> JSONResponse:
-        self._authorize(request)
         try:
             options = await request.json()
         except ValueError as exc:
@@ -443,7 +445,7 @@ class AssetAcquisitionApp:
             scene_id,
             revision.revision,
             options,
-            max_attempts=int(self._scene_config().get("job_max_attempts", 3)),
+            max_attempts=int(self._job_config().get("max_attempts", 3)),
         )
         return JSONResponse(
             {
@@ -474,7 +476,6 @@ class AssetAcquisitionApp:
         return await self._submit_ir_job_endpoint(scene_id, request, "export")
 
     async def _get_job_endpoint(self, job_id: str, request: Request) -> JSONResponse:
-        self._authorize(request)
         try:
             job = self._job_store.get(job_id)
         except JobNotFoundError as exc:
@@ -482,7 +483,6 @@ class AssetAcquisitionApp:
         return JSONResponse(self._public_job(job))
 
     async def _cancel_job_endpoint(self, job_id: str, request: Request) -> JSONResponse:
-        self._authorize(request)
         try:
             job = self._job_store.cancel(job_id)
         except JobNotFoundError as exc:
@@ -494,7 +494,6 @@ class AssetAcquisitionApp:
     async def _get_observation_endpoint(
         self, observation_id: str, request: Request
     ) -> JSONResponse:
-        self._authorize(request)
         job = self._completed_result_job(observation_id, "observe")
         manifest_path = self._safe_result_path(
             self._scene_data_root, job.result.get("manifest_path")
@@ -512,7 +511,6 @@ class AssetAcquisitionApp:
     async def _get_observation_view_endpoint(
         self, observation_id: str, view: str, request: Request
     ) -> Response:
-        self._authorize(request)
         job = self._completed_result_job(observation_id, "observe")
         selected = next(
             (item for item in job.result.get("views", []) if item.get("view") == view),
@@ -533,7 +531,6 @@ class AssetAcquisitionApp:
     async def _get_export_endpoint(
         self, export_id: str, request: Request
     ) -> StreamingResponse:
-        self._authorize(request)
         job = self._completed_result_job(export_id, "export")
         path = self._safe_result_path(
             self._scene_output_root, job.result.get("zip_path")
@@ -853,11 +850,9 @@ class AssetAcquisitionApp:
 
     async def _proxy_sam3d_generate_endpoint(self, request: Request) -> JSONResponse:
         backend = self._require_backend("sam3d", expected_role="generate")
-        self._authorize(request)
-        self._check_rate_limit(self._client_id(request))
         upstream_url = self._upstream_url(backend, "/v1/sam3d/generations")
         headers = self._forward_headers(request, str(uuid.uuid4()))
-        timeout = httpx.Timeout(self._gateway_float("request_timeout_s", 3600.0))
+        timeout = httpx.Timeout(UPSTREAM_TIMEOUT_S)
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.post(
                 upstream_url, content=await request.body(), headers=headers
@@ -889,13 +884,11 @@ class AssetAcquisitionApp:
     ) -> JSONResponse:
         """Forward conditioning data only; the producer publishes shared assets."""
         spec = self._require_backend(backend, expected_role="generate")
-        self._authorize(request)
-        self._check_rate_limit(self._client_id(request))
         try:
             upstream = self._upstream_url(spec, "/v2/generations")
             headers = self._forward_headers(request, str(uuid.uuid4()))
             async with httpx.AsyncClient(
-                timeout=self._gateway_float("request_timeout_s", 3600.0),
+                timeout=UPSTREAM_TIMEOUT_S,
                 trust_env=False,
             ) as client:
                 response = await client.post(
@@ -919,7 +912,9 @@ class AssetAcquisitionApp:
         try:
             public = self._public_asset(self._asset_store.resolve(ref))
         except AssetStoreError as exc:
-            return self._scene_error(502, "unresolved_generation_asset", str(exc), retryable=True)
+            return self._scene_error(
+                502, "unresolved_generation_asset", str(exc), retryable=True
+            )
         public["generation_id"] = payload.get("generation_id")
         self._assert_path_free(public)
         return JSONResponse(public, status_code=201)
@@ -927,7 +922,6 @@ class AssetAcquisitionApp:
     async def _retrieve_v2_endpoint(
         self, source: str, request: Request
     ) -> JSONResponse:
-        self._authorize(request)
         try:
             data = await request.json()
             if not isinstance(data, dict):
@@ -957,14 +951,17 @@ class AssetAcquisitionApp:
                     "materialize_url": f"/v2/retrieve/{source}/{candidate_id}/materialize",
                 }
             )
-        payload = {"source": source, "query": result.get("query"), "candidates": candidates}
+        payload = {
+            "source": source,
+            "query": result.get("query"),
+            "candidates": candidates,
+        }
         self._assert_path_free(payload)
         return JSONResponse(payload)
 
     async def _materialize_v2_endpoint(
         self, source: str, candidate_id: str, request: Request
     ) -> JSONResponse:
-        self._authorize(request)
         try:
             if self._retrieval_engine is None:
                 return await self._remote_materialize_v2(source, candidate_id, request)
@@ -989,7 +986,7 @@ class AssetAcquisitionApp:
         except Exception as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         async with httpx.AsyncClient(
-            timeout=self._gateway_float("request_timeout_s", 3600), trust_env=False
+            timeout=UPSTREAM_TIMEOUT_S, trust_env=False
         ) as client:
             response = await client.post(
                 self._upstream_url(backend, "/v2/candidates"), json=data
@@ -1010,7 +1007,7 @@ class AssetAcquisitionApp:
         backend = self._require_backend(source, expected_role="retrieve")
         try:
             async with httpx.AsyncClient(
-                timeout=self._gateway_float("request_timeout_s", 3600), trust_env=False
+                timeout=UPSTREAM_TIMEOUT_S, trust_env=False
             ) as client:
                 response = await client.post(
                     self._upstream_url(
@@ -1025,13 +1022,14 @@ class AssetAcquisitionApp:
         try:
             stored = self._asset_store.resolve(payload["asset_ref"])
         except (KeyError, AssetStoreError) as exc:
-            raise HTTPException(status_code=502, detail="unresolved materialized asset") from exc
+            raise HTTPException(
+                status_code=502, detail="unresolved materialized asset"
+            ) from exc
         public = self._public_asset(stored)
         self._assert_path_free(public)
         return JSONResponse(public, status_code=201)
 
     async def _asset_v2_endpoint(self, digest: str, request: Request) -> JSONResponse:
-        self._authorize(request)
         try:
             stored = self._asset_store.resolve(f"asset://sha256/{digest}")
         except AssetStoreError as exc:
@@ -1040,8 +1038,9 @@ class AssetAcquisitionApp:
         self._assert_path_free(payload)
         return JSONResponse(payload)
 
-    async def _asset_preview_v2_endpoint(self, digest: str, request: Request) -> Response:
-        self._authorize(request)
+    async def _asset_preview_v2_endpoint(
+        self, digest: str, request: Request
+    ) -> Response:
         ref = f"asset://sha256/{digest}"
         try:
             preview = self._asset_store.preview_path(ref)
@@ -1113,8 +1112,6 @@ class AssetAcquisitionApp:
     async def _retrieve_v1_endpoint(self, source: str, request: Request) -> Any:
         if self._retrieval_engine is None:
             raise HTTPException(status_code=404, detail="Retrieval is not configured")
-        self._authorize(request)
-        self._check_rate_limit(self._client_id(request))
         try:
             data = await request.json()
         except ValueError as exc:
@@ -1158,7 +1155,6 @@ class AssetAcquisitionApp:
     ) -> Response:
         if self._retrieval_engine is None:
             raise HTTPException(status_code=404, detail="Retrieval is not configured")
-        self._authorize(request)
         return await self._retrieval_file_response(source, asset_id)
 
     async def _retrieval_file_response(self, source: str, asset_id: str) -> Response:
@@ -1275,10 +1271,6 @@ class AssetAcquisitionApp:
     ) -> StreamingResponse:
         start = time.time()
         request_id = str(uuid.uuid4())
-        client_id = self._client_id(request)
-
-        self._authorize(request)
-        self._check_rate_limit(client_id)
         upstream_url = (
             f"{upstream_base_url}{upstream_path}"
             if upstream_base_url
@@ -1287,7 +1279,7 @@ class AssetAcquisitionApp:
 
         headers = self._forward_headers(request, request_id)
         body = await request.body()
-        timeout = httpx.Timeout(self._gateway_float("request_timeout_s", 3600.0))
+        timeout = httpx.Timeout(UPSTREAM_TIMEOUT_S)
         http_client = httpx.AsyncClient(timeout=timeout, trust_env=False)
         status_code: int | None = None
 
@@ -1378,30 +1370,6 @@ class AssetAcquisitionApp:
             )
         return f"http://{host}:{port}{upstream_path}"
 
-    def _authorize(self, request: Request) -> None:
-        api_key = self._gateway_value("api_key")
-        if not api_key:
-            return
-        bearer = request.headers.get("authorization", "")
-        token = request.headers.get("x-assetserver-key")
-        if bearer.startswith("Bearer "):
-            token = bearer.removeprefix("Bearer ").strip()
-        if token != api_key:
-            raise HTTPException(status_code=401, detail="Invalid gateway API key")
-
-    def _check_rate_limit(self, client_id: str) -> None:
-        rate_cfg = self._gateway_config().get("rate_limit", {})
-        if not rate_cfg.get("enabled", False):
-            return
-        limit = int(rate_cfg.get("max_requests_per_minute", 60))
-        now = time.time()
-        window = self._rate_window.setdefault(client_id, deque())
-        while window and now - window[0] > 60:
-            window.popleft()
-        if len(window) >= limit:
-            raise HTTPException(status_code=429, detail="Gateway rate limit exceeded")
-        window.append(now)
-
     def _client_id(self, request: Request) -> str:
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
@@ -1467,27 +1435,18 @@ class AssetAcquisitionApp:
         assert isinstance(runtime, dict)
         return runtime
 
-    def _scene_config(self) -> dict[str, Any]:
-        return self._runtime_config().get("scene_server", {})
-
-    def _gateway_config(self) -> dict[str, Any]:
-        if self._config is None or "gateway" not in self._config:
+    def _server_config(self) -> dict[str, Any]:
+        if self._config is None or "server" not in self._config:
             return {}
-        gateway = OmegaConf.to_container(self._config.gateway, resolve=True)
-        assert isinstance(gateway, dict)
-        return gateway
+        server = OmegaConf.to_container(self._config.server, resolve=True)
+        assert isinstance(server, dict)
+        return server
 
-    def _gateway_value(self, key: str) -> Any:
-        if key == "api_key":
-            return self._gateway_config().get(key) or os.environ.get(
-                "ASSETSERVER_API_KEY"
-            )
-        return self._gateway_config().get(key)
+    def _scene_config(self) -> dict[str, Any]:
+        return self._server_config().get("scenes", {})
 
-    def _gateway_int(self, key: str, default: int) -> int:
-        value = self._gateway_value(key)
-        return int(value) if value is not None else default
+    def _storage_config(self) -> dict[str, Any]:
+        return self._server_config().get("storage", {})
 
-    def _gateway_float(self, key: str, default: float) -> float:
-        value = self._gateway_value(key)
-        return float(value) if value is not None else default
+    def _job_config(self) -> dict[str, Any]:
+        return self._server_config().get("jobs", {})
