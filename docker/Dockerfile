@@ -1,4 +1,25 @@
 ARG CUDA_VERSION=12.4.0
+
+FROM python:3.11-slim AS postprocess-runtime
+ARG PYPI_INDEX_URL=""
+WORKDIR /app
+RUN if [ -n "$PYPI_INDEX_URL" ]; then export PIP_INDEX_URL="$PYPI_INDEX_URL"; fi \
+    && pip install --no-cache-dir \
+       "coacd>=1.0.7" "fastapi>=0.115" "numpy>=1.26,<2" \
+       "trimesh>=4.7.4" "uvicorn>=0.30" \
+    && useradd --create-home --uid 10004 postprocess \
+    && mkdir -p /data/postprocess/staging \
+    && chown -R postprocess:postprocess /data/postprocess
+ENV PYTHONPATH=/app ASSETSERVER_DATA_ROOT=/data \
+    ASSETSERVER_POSTPROCESS_STAGING=/data/postprocess/staging \
+    OMP_NUM_THREADS=4
+COPY assetserver/__init__.py /app/assetserver/__init__.py
+COPY assetserver/postprocess_server /app/assetserver/postprocess_server
+COPY assetserver/postprocess /app/assetserver/postprocess
+USER postprocess
+EXPOSE 7100
+ENTRYPOINT ["python", "-m", "assetserver.postprocess_server.standalone_server", "--host", "0.0.0.0", "--port", "7100"]
+
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS python-base
 ARG PYTHON_VERSION=3.11
 ARG UV_VERSION=0.8.22
@@ -155,6 +176,7 @@ COPY assetserver/__init__.py \
      assetserver/scene_compilers.py \
      assetserver/scene_ir.py \
      assetserver/scene_job_handlers.py \
+     assetserver/simulation_assets.py \
      /app/assetserver/
 COPY scripts/build_scene_from_ir.py /app/scripts/build_scene_from_ir.py
 COPY scripts/smoke_scene_viewer.py /app/scripts/smoke_scene_viewer.py

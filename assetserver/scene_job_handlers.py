@@ -19,6 +19,10 @@ from assetserver.blender_scene_worker import BlenderRecipeError, render_recipe
 from assetserver.jobs import Job, JobExecutionError
 from assetserver.scene_compilers import SceneCompileError, blender_recipe, compile_drake_directives
 from assetserver.scene_ir import SceneIR, load_scene_yaml, scene_sha256
+from assetserver.simulation_assets import (
+    SimulationAssetError,
+    simulation_asset_payload,
+)
 
 
 RENDERER_VERSION = "scene-ir-eevee/v2"
@@ -39,11 +43,11 @@ def observe(job: Job) -> dict[str, Any]:
         options = job.request
         views, width, height, image_format = _render_options(options)
         asset_digests = sorted(assets.resolve(ref).digest for ref in scene.asset_refs())
+        visual_scene = _blender_cache_input(scene, assets)
         cache_key = hashlib.sha256(
             json.dumps(
                 {
-                    "scene_sha": scene_sha256(scene),
-                    "asset_digests": asset_digests,
+                    "visual_scene": visual_scene,
                     "renderer_version": RENDERER_VERSION,
                     "options": {
                         "views": views,
@@ -120,6 +124,36 @@ def observe(job: Job) -> dict[str, Any]:
             for item in rendered
         ],
     }
+
+
+def _blender_cache_input(
+    scene: SceneIR, assets: ContentAddressedAssetStore
+) -> dict[str, Any]:
+    """Describe only inputs Blender consumes, excluding collision derivations."""
+    value = scene.model_dump(mode="json", exclude_none=True)
+    fingerprints: dict[str, str] = {}
+    for ref in scene.asset_refs():
+        stored = assets.resolve(ref)
+        visual = stored.manifest["visual"]
+        names = [visual["entrypoint"]] + [
+            part["entrypoint"] for part in visual.get("parts") or []
+        ]
+        records = {
+            item["path"]: item["sha256"] for item in stored.manifest["files"]
+        }
+        payload = {
+            "visual": visual,
+            "files": {name: records[name] for name in sorted(names)},
+            "bounds": stored.manifest.get("bounds"),
+        }
+        fingerprints[ref] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    for room in value["rooms"]:
+        room["shell"]["asset_ref"] = fingerprints[room["shell"]["asset_ref"]]
+    for item in value["objects"]:
+        item["asset_ref"] = fingerprints[item["asset_ref"]]
+    return value
 
 
 def validate(job: Job) -> dict[str, Any]:
@@ -354,6 +388,7 @@ def export(job: Job) -> dict[str, Any]:
                 / f"{job.scene_revision:06d}.yaml"
             ).read_bytes()
         )
+        simulation_payload = _simulation_scene_payload(scene, assets)
         for asset_ref in sorted(scene.asset_refs()):
             stored = assets.resolve(asset_ref)
             target = package / "assets" / "sha256" / stored.digest[:2] / stored.digest
@@ -362,6 +397,10 @@ def export(job: Job) -> dict[str, Any]:
         compiled = package / "compiled"
         (compiled / "drake").mkdir(parents=True)
         (compiled / "blender").mkdir(parents=True)
+        (compiled / "simulation").mkdir(parents=True)
+        (compiled / "simulation" / "scene.json").write_text(
+            json.dumps(simulation_payload, indent=2, sort_keys=True) + "\n"
+        )
 
         def portable_uri(asset_ref: str) -> str:
             stored = assets.resolve(asset_ref)
@@ -397,6 +436,7 @@ def export(job: Job) -> dict[str, Any]:
             "scene_sha256": scene_sha256(scene),
             "asset_digests": sorted(assets.resolve(ref).digest for ref in scene.asset_refs()),
             "assets": sorted(scene.asset_refs()),
+            "simulation_manifest": "compiled/simulation/scene.json",
             "versions": {
                 "exporter": EXPORT_VERSION,
                 "renderer": RENDERER_VERSION,
@@ -443,6 +483,56 @@ def export(job: Job) -> dict[str, Any]:
         "zip_path": _relative(archive, output_root),
         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
         "size_bytes": archive.stat().st_size,
+    }
+
+
+def _simulation_scene_payload(
+    scene: SceneIR, assets: ContentAddressedAssetStore
+) -> dict[str, Any]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for ref in sorted(scene.asset_refs()):
+        stored = assets.resolve(ref)
+        try:
+            payloads[stored.digest] = simulation_asset_payload(stored)
+        except SimulationAssetError as exc:
+            raise JobExecutionError(
+                f"invalid simulation collision asset {ref}: {exc}",
+                code="invalid_collision_asset",
+                retryable=False,
+            ) from exc
+    instances = []
+    for room in scene.rooms:
+        stored = assets.resolve(room.shell.asset_ref)
+        instances.append(
+            {
+                "name": f"room_{room.id}",
+                "asset_digest": stored.digest,
+                "mobility": "static",
+                "scale": 1.0,
+                "transform": room.transform.model_dump(mode="json"),
+            }
+        )
+    for item in scene.objects:
+        stored = assets.resolve(item.asset_ref)
+        instances.append(
+            {
+                "name": item.id,
+                "asset_digest": stored.digest,
+                "mobility": item.mobility,
+                "scale": item.scale,
+                "transform": item.transform.model_dump(mode="json"),
+                "initial_joints": item.initial_joints,
+            }
+        )
+    return {
+        "schema_version": "simulation-scene/v1",
+        "canonical_frame": {
+            "units": "m",
+            "handedness": "right",
+            "up_axis": "+Z",
+        },
+        "assets": payloads,
+        "instances": instances,
     }
 
 

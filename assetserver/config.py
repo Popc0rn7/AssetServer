@@ -11,6 +11,7 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 
 from assetserver.utils.omegaconf import register_resolvers
+from assetserver.postprocess.config import POSTPROCESS_DEFAULTS
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -32,22 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "openclip": "config/openclip.yaml",
     "runtime": {
-        "convex_decomposition": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 7100,
-            "port_range": [7100, 7150],
-            "omp_threads": None,
-            "server_startup_delay": 1.0,
-            "port_cleanup_delay": 1.0,
-        },
-        "postprocess_server": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 7100,
-            "collision_method": "coacd",
-            "timeout_s": 300,
-        },
+        "postprocess": POSTPROCESS_DEFAULTS,
     },
     "backend": [
         "config/generate",

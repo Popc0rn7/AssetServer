@@ -122,8 +122,9 @@ The main config is `config/server.yaml`. Backend declarations are discovered fro
 - `config/generate/*.yaml`
 - `config/retrieve/*.yaml`
 
-SAM3D, Hunyuan3D, Materials, Articulated, and the postprocess server are
-enabled by default. Materials and Articulated datasets must be present under
+SAM3D, Materials, and Articulated are enabled by default. The collision
+postprocess worker is deployed separately and enabled at the Gateway after its
+readiness and backfill checks pass. Materials and Articulated datasets must be present under
 `data/` on the Gateway host; selected candidates are materialized into the
 shared content-addressed store.
 
@@ -141,16 +142,25 @@ Postprocess defaults:
 
 ```yaml
 runtime:
-  postprocess_server:
+  postprocess:
     enabled: true
-    host: 127.0.0.1
-    port: 7100
-    collision_method: coacd
+    policy: required
+    url: http://127.0.0.1:7100
     timeout_s: 300
+    concurrency: 1
+    omp_threads: 4
+    database: data/postprocess/postprocess.sqlite3
+    staging_root: data/postprocess/staging
+    profile:
+      name: rigid-object-v1
+      method: coacd
+      max_convex_hulls: 32
+      threshold: 0.05
 ```
 
-The backend processes read these environment variables when calling
-postprocess:
+`ASSETSERVER_POSTPROCESS_HOST` and `ASSETSERVER_POSTPROCESS_PORT` remain as
+deprecated compatibility variables for one release. New deployments should use
+`runtime.postprocess.url`.
 
 ```bash
 export ASSETSERVER_POSTPROCESS_HOST=127.0.0.1
@@ -167,8 +177,25 @@ Start the mandatory postprocess server first:
 uv run python -m assetserver.postprocess_server.standalone_server \
   --host 127.0.0.1 \
   --port 7100 \
+  --asset-root data/assets \
+  --staging-root data/postprocess/staging \
   --omp-threads 4
 ```
+
+To backfill current Scene IR documents without changing historical revisions,
+run the migration command. It publishes collision children, writes a raw-to-
+derived mapping, and creates explicit new revisions:
+
+```bash
+uv run python scripts/migrate_collision_assets.py \
+  --mapping-output data/postprocess/collision-mapping.json
+```
+
+Final scene exports include `compiled/simulation/scene.json`, an engine-neutral
+index of every instance and collision payload. Export verifies collision paths,
+hashes, link coverage, transforms, and rejects visual triangle meshes used as
+rigid collision before the ZIP is published. Frontends may consume this index,
+the copied asset manifests, or an engine-specific adapter.
 
 Start SAM3D:
 

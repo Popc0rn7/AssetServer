@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
-"""Standalone heavy postprocess server.
+"""Start the isolated CPU-only collision postprocess worker."""
 
-Currently this exposes mandatory convex decomposition at /generate_collision.
-Additional Blender, SDF, and physics postprocessing endpoints should be added
-under this package rather than to generation or retrieval backends.
-"""
+import argparse
+import os
 
-from assetserver.convex_decomposition_server.standalone_server import main
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="AssetServer postprocess worker")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7100)
+    parser.add_argument("--asset-root", default=None)
+    parser.add_argument("--staging-root", default=None)
+    parser.add_argument("--omp-threads", type=int, default=4)
+    parser.add_argument("--log-level", default="info")
+    args = parser.parse_args()
+    # CoACD/OpenMP must see this before the application imports coacd.
+    os.environ["OMP_NUM_THREADS"] = str(args.omp_threads)
+
+    from assetserver.postprocess_server.server_app import PostprocessServerApp
+
+    import uvicorn
+
+    app = PostprocessServerApp(args.asset_root, args.staging_root)
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
 
 
 if __name__ == "__main__":

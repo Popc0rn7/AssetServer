@@ -17,20 +17,30 @@ openclip: config/openclip.yaml
 # here because most pipelines depend on them and they are not treated as
 # replaceable generation/retrieval sources.
 runtime:
-  convex_decomposition:
+  postprocess:
     enabled: false
-    host: 127.0.0.1
-    port: 7100
-    port_range: [7100, 7150]
-    omp_threads: null
-    server_startup_delay: 1.0
-    port_cleanup_delay: 1.0
-  postprocess_server:
-    enabled: false
-    host: 127.0.0.1
-    port: 7100
-    collision_method: coacd
+    policy: required
+    url: http://127.0.0.1:7100
     timeout_s: 300
+    concurrency: 1
+    omp_threads: 4
+    database: ${oc.env:ASSETSERVER_POSTPROCESS_DATABASE,data/postprocess/postprocess.sqlite3}
+    staging_root: ${oc.env:ASSETSERVER_POSTPROCESS_STAGING,data/postprocess/staging}
+    profile:
+      name: rigid-object-v1
+      method: coacd
+      max_convex_hulls: 32
+      threshold: 0.05
+      preprocess_mode: auto
+      preprocess_resolution: 50
+      resolution: 2000
+      mcts_nodes: 20
+      mcts_iterations: 150
+      mcts_max_depth: 3
+      max_ch_vertex: 128
+      merge: true
+      decimate: false
+      seed: 0
 
 # Backend declarations are loaded from these directories. Each backend YAML owns
 # its complete configuration, including whether it is enabled.

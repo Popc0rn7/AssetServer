@@ -16,6 +16,7 @@ def test_all_container_services_are_targets_in_one_stage_graph():
     dockerfile = Path("docker/Dockerfile").read_text()
 
     assert dockerfile.count("FROM nvidia/cuda:") == 1
+    assert "FROM python:3.11-slim AS postprocess-runtime" in dockerfile
     assert "FROM builder-base AS sam3d-builder" in dockerfile
     assert "FROM builder-base AS openclip-runtime" in dockerfile
     assert "FROM builder-base AS hunyuan3d-builder" in dockerfile
@@ -62,15 +63,34 @@ def test_sam3d_runtime_contains_its_lazy_pipeline_dependencies():
 def test_registry_is_the_only_runtime_container_source():
     registry = yaml.safe_load(Path("docker/services.yaml").read_text())["services"]
 
-    assert set(registry) == {"sam3d", "openclip", "hunyuan3d", "scene-viewer"}
+    assert set(registry) == {
+        "postprocess",
+        "sam3d",
+        "openclip",
+        "hunyuan3d",
+        "scene-viewer",
+    }
     assert {item["target"] for item in registry.values()} == {
         "sam3d-runtime",
         "openclip-runtime",
         "hunyuan3d-runtime",
         "scene-viewer",
+        "postprocess-runtime",
     }
     assert all(item["image"].startswith("assetserver/") for item in registry.values())
     assert not Path("scripts/run_backend_docker.py").exists()
+
+
+def test_postprocess_target_is_cpu_only_and_minimal():
+    dockerfile = Path("docker/Dockerfile").read_text()
+    runtime = dockerfile.split(
+        "FROM python:3.11-slim AS postprocess-runtime", 1
+    )[1].split("FROM nvidia/cuda:", 1)[0]
+
+    assert "coacd" in runtime
+    assert "torch" not in runtime.lower()
+    assert "blender" not in runtime.lower()
+    assert "cuda" not in runtime.lower()
 
 
 def test_http_service_host_ports_come_from_backend_configs():

@@ -26,6 +26,11 @@ from assetserver.asset_store import (
 )
 from assetserver.config import BackendSpec, backend_specs, enabled_backend_specs
 from assetserver.jobs import JobNotFoundError, SQLiteJobStore
+from assetserver.postprocess.collision import (
+    CollisionPostprocessError,
+    CollisionPostprocessor,
+)
+from assetserver.postprocess.config import PostprocessConfig
 from assetserver.scene_renderer import SceneRendererClient, SceneRendererError
 from assetserver.scenes import (
     SceneConflictError,
@@ -150,6 +155,7 @@ class AssetAcquisitionApp:
         ir_scene_store: IRSceneStore | None = None,
         job_store: SQLiteJobStore | None = None,
         asset_store: ContentAddressedAssetStore | None = None,
+        collision_postprocessor: Any | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
@@ -189,6 +195,14 @@ class AssetAcquisitionApp:
             or (ir_scene_store.asset_store if ir_scene_store is not None else None)
             or ContentAddressedAssetStore(data_root / "assets")
         )
+        postprocess_data = self._runtime_config().get("postprocess")
+        self._collision_postprocessor = collision_postprocessor
+        if self._collision_postprocessor is None and postprocess_data:
+            postprocess_config = PostprocessConfig.from_mapping(postprocess_data)
+            if postprocess_config.enabled and postprocess_config.policy == "required":
+                self._collision_postprocessor = CollisionPostprocessor(
+                    self._asset_store, postprocess_config
+                )
         if ir_scene_store is None and scene_config.get("scene_ir_api_enabled", False):
             ir_scene_store = IRSceneStore(
                 data_root / "scenes", ContentAddressedAssetStore(data_root / "assets")
@@ -910,11 +924,15 @@ class AssetAcquisitionApp:
                 retryable=True,
             )
         try:
-            public = self._public_asset(self._asset_store.resolve(ref))
+            stored = self._asset_store.resolve(ref)
+            stored = await self._ensure_simulation_ready(stored)
+            public = self._public_asset(stored)
         except AssetStoreError as exc:
             return self._scene_error(
                 502, "unresolved_generation_asset", str(exc), retryable=True
             )
+        except CollisionPostprocessError as exc:
+            return self._postprocess_error(exc)
         public["generation_id"] = payload.get("generation_id")
         self._assert_path_free(public)
         return JSONResponse(public, status_code=201)
@@ -972,6 +990,10 @@ class AssetAcquisitionApp:
             return await self._remote_materialize_v2(source, candidate_id, request)
         except (ValueError, AssetStoreError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            stored = await self._ensure_simulation_ready(stored)
+        except CollisionPostprocessError as exc:
+            return self._postprocess_error(exc)
         payload = self._public_asset(stored)
         self._assert_path_free(payload)
         return JSONResponse(payload, status_code=201)
@@ -1025,6 +1047,10 @@ class AssetAcquisitionApp:
             raise HTTPException(
                 status_code=502, detail="unresolved materialized asset"
             ) from exc
+        try:
+            stored = await self._ensure_simulation_ready(stored)
+        except CollisionPostprocessError as exc:
+            return self._postprocess_error(exc)
         public = self._public_asset(stored)
         self._assert_path_free(public)
         return JSONResponse(public, status_code=201)
@@ -1434,6 +1460,25 @@ class AssetAcquisitionApp:
         runtime = OmegaConf.to_container(self._config.runtime, resolve=True)
         assert isinstance(runtime, dict)
         return runtime
+
+    async def _ensure_simulation_ready(self, stored: StoredAsset) -> StoredAsset:
+        if self._collision_postprocessor is None:
+            return stored
+        ensure = getattr(self._collision_postprocessor, "ensure_simulation_ready", None)
+        if ensure is None:
+            ensure = self._collision_postprocessor.ensure_collision_ready
+        return await ensure(stored.asset_ref)
+
+    @staticmethod
+    def _postprocess_error(exc: CollisionPostprocessError) -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": exc.code,
+                "message": str(exc),
+                "retryable": exc.retryable,
+            },
+            status_code=exc.status_code,
+        )
 
     def _server_config(self) -> dict[str, Any]:
         if self._config is None or "server" not in self._config:

@@ -1,4 +1,21 @@
 services:
+  postprocess:
+    target: postprocess-runtime
+    image: assetserver/postprocess
+    image_env: ASSETSERVER_POSTPROCESS_IMAGE
+    container: assetserver-postprocess
+    gpu: false
+    container_port: 7100
+    ready_path: /health/ready
+    ready_timeout_s: 30
+    data: read-write
+    assets_read_only: true
+    run_as_host: true
+    environment:
+      ASSETSERVER_DATA_ROOT: /data
+      ASSETSERVER_POSTPROCESS_STAGING: /data/postprocess/staging
+      OMP_NUM_THREADS: "4"
+
   sam3d:
     target: sam3d-runtime
     image: assetserver/sam3d

@@ -80,22 +80,14 @@ Tasks:
 
 ## P2: define the `runtime` compatibility contract
 
-Keep these sections for forward compatibility:
+Completed:
 
-- `runtime.convex_decomposition`
-- `runtime.postprocess_server`
-
-Tasks:
-
-- Document which fields are currently consumed and which are reserved.
-- Do not present a reserved field as operational configuration in the README.
-- Reconcile built-in defaults with `server.yaml`; currently the built-in
-  `convex_decomposition.enabled` and `postprocess_server.enabled` values differ
-  from the YAML values.
-- Decide whether `convex_decomposition` is a lower-level implementation of
-  `postprocess_server` or a separately configurable service. Avoid two active
-  sources for the same host and port.
-- Wire reserved fields only when service lifecycle/config ownership is clear.
+- Replaced the overlapping `runtime.convex_decomposition` and
+  `runtime.postprocess_server` sections with the operational
+  `runtime.postprocess` section.
+- Kept one-release warnings for the legacy host/port environment variables.
+- Made Gateway the lifecycle-independent client; the worker is deployed and
+  restarted by the service manager rather than spawned by Gateway.
 
 ## P3: untangle scene configuration
 
