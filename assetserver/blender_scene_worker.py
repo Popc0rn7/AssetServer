@@ -17,6 +17,24 @@ class BlenderRecipeError(ValueError):
     pass
 
 
+_OBSERVATION_CUTAWAY = {
+    "top": frozenset({"ceiling"}),
+    "front": frozenset({"wall_south"}),
+    "side": frozenset({"wall_east"}),
+    "perspective": frozenset({"ceiling", "wall_south", "wall_east"}),
+    "room_corner": frozenset({"ceiling", "wall_south", "wall_west"}),
+    "agent_view": frozenset({"wall_south"}),
+}
+
+
+def observation_hidden_shell_roles(view: str) -> frozenset[str]:
+    """Deterministic observation-only shell visibility policy."""
+    try:
+        return _OBSERVATION_CUTAWAY[view]
+    except KeyError as exc:
+        raise BlenderRecipeError(f"unsupported view: {view}") from exc
+
+
 def build_blend(recipe_path: str | Path, output_path: str | Path) -> None:
     import bpy
 
@@ -61,7 +79,11 @@ def render_recipe(
     scene.world = bpy.data.worlds.new("SceneIRWorld")
     scene.world.color = (0.055, 0.055, 0.055)
 
-    minimum, maximum = _world_bounds(imported)
+    if recipe.get("observation_bounds"):
+        minimum = Vector(recipe["observation_bounds"]["min"])
+        maximum = Vector(recipe["observation_bounds"]["max"])
+    else:
+        minimum, maximum = _world_bounds(imported)
     center = (minimum + maximum) / 2
     extent = maximum - minimum
     radius = max(float(extent.length) * 0.8, 2.0)
@@ -99,6 +121,10 @@ def render_recipe(
     rendered = []
     render_device = _render_device()
     for view in requested:
+        hidden_roles = observation_hidden_shell_roles(view)
+        for obj in imported:
+            role = obj.get("assetserver_procedural_shell_role")
+            obj.hide_render = role in hidden_roles
         camera.location = center + Vector(offsets[view])
         camera.rotation_euler = (
             (center - camera.location).to_track_quat("-Z", "Y").to_euler()
@@ -166,12 +192,31 @@ def _build_scene(recipe: dict):
                 all_imported.extend(imported)
         else:
             imported = _import_visual(Path(instance["visual"]))
+            if instance.get("procedural_shell"):
+                for obj in imported:
+                    role = _procedural_shell_role(obj.name)
+                    if role is not None:
+                        obj["assetserver_procedural_shell_role"] = role
+                    obj["assetserver_scene_instance"] = instance["name"]
             for obj in imported:
                 if obj.parent is None:
                     obj.parent = asset_frame
+                obj["assetserver_scene_instance"] = instance["name"]
             all_imported.extend(imported)
     bpy.context.view_layer.update()
     return all_imported
+
+
+def _procedural_shell_role(name: str) -> str | None:
+    normalized = name.lower()
+    if "ceiling" in normalized:
+        return "ceiling"
+    if "floor" in normalized:
+        return "floor"
+    for wall in ("north", "south", "east", "west"):
+        if f"wall_{wall}" in normalized:
+            return f"wall_{wall}"
+    return None
 
 
 def _import_visual(visual: Path):

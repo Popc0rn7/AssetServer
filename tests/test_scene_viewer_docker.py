@@ -13,8 +13,11 @@ def test_scene_viewer_branches_before_torch_and_installs_source_last():
     assert '"drake==${DRAKE_VERSION}"' in target
     assert "import bpy, pydrake" in target
     assert target.index('"bpy==${BLENDER_VERSION}"') < target.index(
-        "COPY assetserver/__init__.py"
+        "COPY assetserver /app/assetserver"
     )
+    assert '"trimesh>=4.7.4"' in target
+    assert "ASSETSERVER_BUILD_VERSION=${IMAGE_VERSION}" in target
+    assert "org.assetserver.scene-ir-model" in target
     assert "install_sam3d_docker.sh" not in target
 
 

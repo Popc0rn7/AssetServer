@@ -2,8 +2,12 @@ import argparse
 import logging
 import signal
 import time
+import uuid
+
+from pathlib import Path
 
 from assetserver.config import enabled_backend_specs, load_assetserver_config
+from assetserver.runtime_version import register_runtime
 
 from .server_manager import AssetAcquisitionServer
 
@@ -28,6 +32,12 @@ def main() -> None:
     cfg = load_assetserver_config(config_path=args.config)
     host = args.host or cfg.server.host
     port = args.port or cfg.server.port
+    register_runtime(
+        Path(str(cfg.server.storage.data_root)),
+        role="api",
+        instance_id=f"{host}-{port}-{uuid.uuid4().hex[:8]}",
+        logger=console_logger,
+    )
 
     server = AssetAcquisitionServer(host=host, port=port, config=cfg)
 

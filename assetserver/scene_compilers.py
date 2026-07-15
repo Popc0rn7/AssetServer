@@ -10,11 +10,23 @@ from collections.abc import Callable
 import yaml
 
 from assetserver.asset_store import ContentAddressedAssetStore, IDENTITY_MATRIX
-from assetserver.scene_ir import SceneIR, Transform
+from assetserver.procedural_room_shell import ProceduralRoomShellStore
+from assetserver.scene_ir import AssetRoomShell, SceneIR, Transform
 
 
 class SceneCompileError(ValueError):
     pass
+
+
+# trimesh writes its Z-up coordinates into glTF's Y-up frame. Blender's glTF
+# importer preserves that node conversion, so generated visuals need the inverse
+# at the Scene IR asset frame. Drake consumes the generated SDF and does not use it.
+TRIMESH_GLTF_TO_SCENE_IR = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
 
 
 class _Rpy(tuple):
@@ -36,13 +48,23 @@ def compile_drake_directives(
     assets: ContentAddressedAssetStore,
     *,
     uri_resolver: Callable[[str], str] | None = None,
+    procedural_uri_resolver: Callable[[str, str], str] | None = None,
 ) -> bytes:
     directives: list[dict] = []
     for room in scene.rooms:
         model_name = f"room_{room.id}"
-        uri, base_link, asset_transform = _simulation_spec(
-            room.shell.asset_ref, assets, uri_resolver
-        )
+        if isinstance(room.shell, AssetRoomShell):
+            uri, base_link, asset_transform = _simulation_spec(
+                room.shell.asset_ref, assets, uri_resolver
+            )
+        else:
+            generated = _procedural_store(assets).materialize(room.shell)
+            uri = (
+                procedural_uri_resolver(room.id, generated.cache_key)
+                if procedural_uri_resolver is not None
+                else str(generated.simulation_path.resolve())
+            )
+            base_link, asset_transform = "shell", IDENTITY_MATRIX
         directives.extend(
             _drake_instance(
                 model_name,
@@ -84,7 +106,9 @@ def _simulation_spec(
     simulation = stored.manifest.get("simulation") or {}
     base_link = simulation.get("base_link")
     if not isinstance(base_link, str) or not base_link:
-        raise SceneCompileError(f"asset has no declared simulation base link: {asset_ref}")
+        raise SceneCompileError(
+            f"asset has no declared simulation base link: {asset_ref}"
+        )
     uri = (
         resolver(asset_ref)
         if resolver is not None
@@ -131,16 +155,53 @@ def blender_recipe(scene: SceneIR, assets: ContentAddressedAssetStore) -> bytes:
     """Create a transport-neutral recipe consumed by the bpy viewer worker."""
     instances = []
     for room in scene.rooms:
-        instances.append(
-            _blender_instance(
-                f"room_{room.id}",
-                room.shell.asset_ref,
-                room.transform,
-                assets,
-                1.0,
-                {},
+        if isinstance(room.shell, AssetRoomShell):
+            instances.append(
+                _blender_instance(
+                    f"room_{room.id}",
+                    room.shell.asset_ref,
+                    room.transform,
+                    assets,
+                    1.0,
+                    {},
+                )
             )
-        )
+        else:
+            generated = _procedural_store(assets).materialize(room.shell)
+            x, y, z = room.shell.dimensions
+            t, floor_t = room.shell.wall_thickness, room.shell.floor_thickness
+            instances.append(
+                {
+                    "name": f"room_{room.id}",
+                    "visual": str(generated.visual_path.resolve()),
+                    "translation": list(room.transform.translation),
+                    "rotation_radians": [
+                        math.radians(v) for v in room.transform.rotation_rpy_degrees
+                    ],
+                    "scale": 1.0,
+                    "asset_transform": TRIMESH_GLTF_TO_SCENE_IR,
+                    "initial_joints": {},
+                    "bounds": {
+                        "min": [-x / 2 - t, -y / 2 - t, -floor_t],
+                        "max": [
+                            x / 2 + t,
+                            y / 2 + t,
+                            z + (floor_t if room.shell.include_ceiling else 0),
+                        ],
+                    },
+                    "interior_bounds": _world_aabb(
+                        [-x / 2, -y / 2, 0.0],
+                        [x / 2, y / 2, z],
+                        room.transform,
+                    ),
+                    "materials": ["wall", "floor", "ceiling"],
+                    "procedural_shell": {
+                        "cache_key": generated.cache_key,
+                        "generator_version": generated.manifest["generator_version"],
+                        "material_version": generated.manifest["material_version"],
+                    },
+                }
+            )
     for obj in scene.objects:
         instances.append(
             _blender_instance(
@@ -152,12 +213,24 @@ def blender_recipe(scene: SceneIR, assets: ContentAddressedAssetStore) -> bytes:
                 obj.initial_joints,
             )
         )
-    return (
-        json.dumps(
-            {"schema_version": "blender-recipe/v1", "instances": instances}, indent=2
-        )
-        + "\n"
-    ).encode()
+    interior_bounds = [
+        instance["interior_bounds"]
+        for instance in instances
+        if instance.get("interior_bounds") is not None
+    ]
+    recipe = {"schema_version": "blender-recipe/v1", "instances": instances}
+    if interior_bounds:
+        recipe["observation_bounds"] = {
+            "min": [
+                min(bounds["min"][axis] for bounds in interior_bounds)
+                for axis in range(3)
+            ],
+            "max": [
+                max(bounds["max"][axis] for bounds in interior_bounds)
+                for axis in range(3)
+            ],
+        }
+    return (json.dumps(recipe, indent=2) + "\n").encode()
 
 
 def _blender_instance(
@@ -212,7 +285,8 @@ def _validate_initial_joints(
     if not positions:
         return
     declared = {
-        item.get("name"): item for item in assets.resolve(asset_ref).manifest.get("joints", [])
+        item.get("name"): item
+        for item in assets.resolve(asset_ref).manifest.get("joints", [])
     }
     for name, position in positions.items():
         field = f"objects[{object_id}].initial_joints.{name}"
@@ -244,18 +318,55 @@ def _composed_pose(
     return translation, [math.degrees(value) for value in (roll, pitch, yaw)]
 
 
+def _procedural_store(
+    assets: ContentAddressedAssetStore,
+) -> ProceduralRoomShellStore:
+    return ProceduralRoomShellStore(assets.root.parent / "procedural_room_shells")
+
+
 def _pose_matrix(transform: Transform) -> list[list[float]]:
     roll, pitch, yaw = [math.radians(v) for v in transform.rotation_rpy_degrees]
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cy, sy = math.cos(yaw), math.sin(yaw)
     matrix = [
-        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr, transform.translation[0]],
-        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr, transform.translation[1]],
+        [
+            cy * cp,
+            cy * sp * sr - sy * cr,
+            cy * sp * cr + sy * sr,
+            transform.translation[0],
+        ],
+        [
+            sy * cp,
+            sy * sp * sr + cy * cr,
+            sy * sp * cr - cy * sr,
+            transform.translation[1],
+        ],
         [-sp, cp * sr, cp * cr, transform.translation[2]],
         [0.0, 0.0, 0.0, 1.0],
     ]
     return matrix
+
+
+def _world_aabb(
+    minimum: list[float], maximum: list[float], transform: Transform
+) -> dict[str, list[float]]:
+    """Transform a local AABB into a world AABB using the Scene IR pose."""
+    matrix = _pose_matrix(transform)
+    corners = [
+        [x, y, z, 1.0]
+        for x in (minimum[0], maximum[0])
+        for y in (minimum[1], maximum[1])
+        for z in (minimum[2], maximum[2])
+    ]
+    points = [
+        [sum(matrix[row][column] * corner[column] for column in range(4)) for row in range(3)]
+        for corner in corners
+    ]
+    return {
+        "min": [min(point[axis] for point in points) for axis in range(3)],
+        "max": [max(point[axis] for point in points) for axis in range(3)],
+    }
 
 
 def _matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:

@@ -30,6 +30,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "jobs": {
             "max_attempts": 3,
         },
+        "artifacts": {
+            "observation_retention_days": 30,
+            "workflow_retention_days": 30,
+        },
     },
     "openclip": "config/openclip.yaml",
     "runtime": {

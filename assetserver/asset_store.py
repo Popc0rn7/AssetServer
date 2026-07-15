@@ -15,6 +15,7 @@ import os
 import shutil
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -41,6 +42,21 @@ class StoredAsset:
     digest: str
     root: Path
     manifest: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PackagedAsset:
+    path: Path
+    size_bytes: int
+    sha256: str
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def canonical_source_frame() -> dict[str, Any]:
@@ -303,6 +319,55 @@ class ContentAddressedAssetStore:
             return None
         path = self.file_path(asset.root, preview)
         return path if path.is_file() else None
+
+    def package(self, asset_ref: str) -> PackagedAsset:
+        """Build a deterministic, portable ZIP for an immutable asset.
+
+        Archive paths match manifest entrypoints directly. The internal CAS
+        ``files/`` directory is intentionally not exposed in the package.
+        """
+        asset = self.resolve(asset_ref)
+        packages = self.root / "packages"
+        output = packages / f"{asset.digest}.zip"
+        checksum = packages / f"{asset.digest}.sha256"
+        if output.is_file() and checksum.is_file():
+            expected = checksum.read_text().strip()
+            actual = _file_sha256(output)
+            if expected == actual:
+                return PackagedAsset(output, output.stat().st_size, actual)
+
+        packages.mkdir(parents=True, exist_ok=True)
+        temporary = packages / f".{asset.digest}-{uuid.uuid4().hex}.zip.tmp"
+        checksum_temporary = packages / f".{asset.digest}-{uuid.uuid4().hex}.sha256.tmp"
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+                self._write_package_entry(
+                    archive, "manifest.json", (asset.root / "manifest.json").read_bytes()
+                )
+                for record in asset.manifest.get("files") or []:
+                    relative = _safe_name(str(record["path"]))
+                    self._write_package_entry(
+                        archive,
+                        relative,
+                        self.file_path(asset.root, relative).read_bytes(),
+                    )
+            digest = _file_sha256(temporary)
+            checksum_temporary.write_text(digest + "\n")
+            os.replace(temporary, output)
+            os.replace(checksum_temporary, checksum)
+            return PackagedAsset(output, output.stat().st_size, digest)
+        finally:
+            temporary.unlink(missing_ok=True)
+            checksum_temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_package_entry(
+        archive: zipfile.ZipFile, name: str, content: bytes
+    ) -> None:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.external_attr = 0o100644 << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, content)
 
     @staticmethod
     def file_path(root: Path, relative: str) -> Path:

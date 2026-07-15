@@ -21,6 +21,17 @@ _ASSET_REF = re.compile(r"^asset://sha256/[0-9a-f]{64}$")
 class SceneIRValidationError(ValueError):
     """The submitted Scene IR is syntactically or semantically invalid."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_scene_ir",
+        details: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -49,13 +60,66 @@ class RoomShell(StrictModel):
         return value
 
 
+class RoomOpening(StrictModel):
+    id: str
+    opening_type: Literal["door", "window", "open"]
+    wall: Literal["north", "south", "east", "west"]
+    offset_m: float = Field(ge=0)
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    sill_height: float = Field(default=0, ge=0)
+
+    @field_validator("id")
+    @classmethod
+    def valid_id(cls, value: str) -> str:
+        if not _ID.fullmatch(value):
+            raise ValueError("invalid opening id")
+        return value
+
+    @field_validator("offset_m", "width", "height", "sill_height")
+    @classmethod
+    def finite_values(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("opening values must be finite")
+        return value
+
+
+class ProceduralRoomShell(StrictModel):
+    kind: Literal["procedural"]
+    dimensions: tuple[float, float, float]
+    wall_thickness: float = Field(default=0.05, gt=0)
+    floor_thickness: float = Field(default=0.1, gt=0)
+    include_ceiling: bool = False
+    openings: list[RoomOpening] = Field(default_factory=list)
+
+    @field_validator("dimensions")
+    @classmethod
+    def valid_dimensions(
+        cls, value: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        if not all(math.isfinite(item) and item > 0 for item in value):
+            raise ValueError("room dimensions must be finite and positive")
+        return value
+
+    @field_validator("wall_thickness", "floor_thickness")
+    @classmethod
+    def finite_thickness(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("room thickness must be finite")
+        return value
+
+
+AssetRoomShell = RoomShell
+RoomShellValue = RoomShell | ProceduralRoomShell
+
+
 class Room(StrictModel):
     id: str
     type: str = "room"
     name: str | None = None
     transform: Transform = Field(default_factory=Transform)
-    shell: RoomShell
-    metadata: dict[str, str | float | bool] = Field(default_factory=dict)
+    shell: RoomShellValue
+    metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
     @field_validator("id")
     @classmethod
@@ -116,7 +180,10 @@ class SceneObject(StrictModel):
     @field_validator("initial_joints")
     @classmethod
     def finite_joints(cls, value: dict[str, float]) -> dict[str, float]:
-        if not all(_ID.fullmatch(name) and math.isfinite(position) for name, position in value.items()):
+        if not all(
+            _ID.fullmatch(name) and math.isfinite(position)
+            for name, position in value.items()
+        ):
             raise ValueError("joint names must be valid ids and positions finite")
         return value
 
@@ -148,7 +215,9 @@ class SceneIR(StrictModel):
         known_objects = set(object_ids)
         for obj in self.objects:
             if obj.room_id not in known_rooms:
-                raise ValueError(f"object {obj.id} references unknown room {obj.room_id}")
+                raise ValueError(
+                    f"object {obj.id} references unknown room {obj.room_id}"
+                )
             if obj.placement:
                 parent = obj.placement.parent_object_id
                 if parent == obj.id or parent not in known_objects:
@@ -156,9 +225,12 @@ class SceneIR(StrictModel):
         return self
 
     def asset_refs(self) -> set[str]:
-        return {room.shell.asset_ref for room in self.rooms} | {
-            obj.asset_ref for obj in self.objects
+        room_refs = {
+            room.shell.asset_ref
+            for room in self.rooms
+            if isinstance(room.shell, AssetRoomShell)
         }
+        return room_refs | {obj.asset_ref for obj in self.objects}
 
 
 def load_scene_yaml(content: bytes | str) -> SceneIR:
@@ -167,6 +239,7 @@ def load_scene_yaml(content: bytes | str) -> SceneIR:
         value = yaml.safe_load(content)
         if not isinstance(value, dict):
             raise SceneIRValidationError("Scene IR must be a YAML mapping")
+        _validate_procedural_shells(value)
         return SceneIR.model_validate(value)
     except SceneIRValidationError:
         raise
@@ -187,3 +260,97 @@ def dump_scene_yaml(scene: SceneIR) -> bytes:
 
 def scene_sha256(scene: SceneIR) -> str:
     return hashlib.sha256(dump_scene_yaml(scene)).hexdigest()
+
+
+def _validate_procedural_shells(value: dict[str, Any]) -> None:
+    rooms = value.get("rooms")
+    if not isinstance(rooms, list):
+        return
+    for room in rooms:
+        if not isinstance(room, dict) or not isinstance(room.get("shell"), dict):
+            continue
+        shell = room["shell"]
+        if "kind" in shell and shell.get("kind") != "procedural":
+            raise SceneIRValidationError(
+                f"room '{room.get('id', 'unknown')}' uses an unsupported shell kind",
+                code="procedural_shell_unsupported",
+                details={"room_id": str(room.get("id", "unknown"))},
+            )
+        if shell.get("kind") != "procedural":
+            continue
+        room_id = str(room.get("id", "unknown"))
+        dimensions = shell.get("dimensions")
+        if not (
+            isinstance(dimensions, (list, tuple))
+            and len(dimensions) == 3
+            and all(
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and math.isfinite(item)
+                and item > 0
+                for item in dimensions
+            )
+        ):
+            raise SceneIRValidationError(
+                f"room '{room_id}' dimensions must contain three positive finite values",
+                code="invalid_room_dimensions",
+                details={"room_id": room_id},
+            )
+        x, y, z = (float(item) for item in dimensions)
+        openings = shell.get("openings", [])
+        if not isinstance(openings, list):
+            continue
+        ids: set[str] = set()
+        intervals: dict[str, list[tuple[float, float, str]]] = {}
+        for opening in openings:
+            if not isinstance(opening, dict):
+                continue
+            opening_id = str(opening.get("id", "unknown"))
+            details = {"room_id": room_id, "opening_id": opening_id}
+            if opening_id in ids:
+                raise SceneIRValidationError(
+                    f"duplicate opening id '{opening_id}' in room '{room_id}'",
+                    code="duplicate_opening_id",
+                    details=details,
+                )
+            ids.add(opening_id)
+            try:
+                wall = str(opening["wall"])
+                offset = float(opening["offset_m"])
+                width = float(opening["width"])
+                height = float(opening["height"])
+                sill = float(opening.get("sill_height", 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            wall_length = x if wall in {"north", "south"} else y
+            if (
+                not all(math.isfinite(item) for item in (offset, width, height, sill))
+                or offset < 0
+                or width <= 0
+                or height <= 0
+                or sill < 0
+                or offset + width > wall_length + 1e-9
+                or sill + height > z + 1e-9
+            ):
+                raise SceneIRValidationError(
+                    f"opening '{opening_id}' exceeds {wall} wall bounds",
+                    code="opening_out_of_bounds",
+                    details=details,
+                )
+            if opening.get("opening_type") == "open" and not (
+                abs(sill) <= 1e-9 and abs(height - z) <= 1e-9
+            ):
+                raise SceneIRValidationError(
+                    f"opening '{opening_id}' must be floor-to-ceiling",
+                    code="invalid_opening_semantics",
+                    details=details,
+                )
+            wall_intervals = intervals.setdefault(wall, [])
+            for start, end, other_id in wall_intervals:
+                if offset < end - 1e-9 and start < offset + width - 1e-9:
+                    raise SceneIRValidationError(
+                        f"opening '{opening_id}' overlaps '{other_id}' on {wall} wall",
+                        code="opening_overlap",
+                        details=details,
+                    )
+            wall_intervals.append((offset, offset + width, opening_id))

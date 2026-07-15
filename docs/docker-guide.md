@@ -5,6 +5,20 @@ Gateway and local Materials/Articulated retrieval engine run directly in the
 host Python environment. There is no Gateway image, root Dockerfile, Compose
 deployment, or Docker-socket backend launcher.
 
+Scene IR API 与 `scene-viewer` worker 必须部署同一版本的 `assetserver` Python 包。
+Scene worker 镜像复制完整包，并在启动日志和共享 `data/runtime/scene-worker.json` 中记录
+Scene IR schema/model 与镜像 build version。更新 Scene IR 或 procedural shell generator
+后应执行：
+
+```bash
+python3 scripts/docker_service.py build scene-viewer
+python3 scripts/docker_service.py run scene-viewer
+docker logs --tail 80 assetserver-scene-viewer-worker
+```
+
+日志必须显示与 API 一致的 `scene_ir_model`；版本不一致属于部署错误，不应通过重试 scene
+job 规避。
+
 ## Authoritative files
 
 ```text

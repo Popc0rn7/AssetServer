@@ -24,6 +24,50 @@ def test_submit_is_durable_and_idempotent(tmp_path):
     assert second.job_id == first.job_id
 
 
+@pytest.mark.parametrize("terminal", ["failed", "cancelled"])
+def test_terminal_job_is_never_a_valid_dedup_target(tmp_path, terminal):
+    store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
+    first, _ = store.submit("observe", "scene", 1, {"views": ["top"]})
+    if terminal == "failed":
+        store.claim("worker")
+        store.fail(
+            first.job_id,
+            "worker",
+            code="schema_error",
+            message="old worker rejected the scene",
+            retryable=False,
+        )
+    else:
+        store.cancel(first.job_id)
+
+    second, created = store.submit("observe", "scene", 1, {"views": ["top"]})
+
+    assert created is True
+    assert second.job_id != first.job_id
+    assert second.status == "queued"
+    assert store.claim("new-worker").job_id == second.job_id
+    assert store.get(first.job_id).status == terminal
+
+
+def test_completed_job_deduplicates_but_cache_version_change_does_not(tmp_path):
+    store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
+    first, _ = store.submit("observe", "scene", 1, {}, cache_version="worker/v1")
+    store.claim("worker")
+    store.complete(first.job_id, "worker", {"ok": True})
+
+    duplicate, created = store.submit(
+        "observe", "scene", 1, {}, cache_version="worker/v1"
+    )
+    upgraded, upgraded_created = store.submit(
+        "observe", "scene", 1, {}, cache_version="worker/v2"
+    )
+
+    assert created is False
+    assert duplicate.job_id == first.job_id
+    assert upgraded_created is True
+    assert upgraded.job_id != first.job_id
+
+
 def test_concurrent_workers_claim_job_exactly_once(tmp_path):
     store = SQLiteJobStore(tmp_path / "jobs.sqlite3")
     submitted, _ = store.submit("observe", "scene", 1, {})

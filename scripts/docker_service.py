@@ -115,6 +115,15 @@ def build(name: str, service: dict[str, Any], args: argparse.Namespace) -> None:
         check=False,
     )
     revision = git.stdout.strip() or "dev"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if dirty.stdout.strip():
+        revision = f"{revision}-dirty"
     command = [
         *docker,
         "build",
@@ -148,6 +157,7 @@ def build(name: str, service: dict[str, Any], args: argparse.Namespace) -> None:
     if name == "scene-viewer":
         for key in ("BLENDER_VERSION", "DRAKE_VERSION"):
             command.extend(["--build-arg", f"{key}={versions[key]}"])
+        command.extend(["--build-arg", f"IMAGE_VERSION={revision}"])
     if name == "hunyuan3d" and os.environ.get("HUNYUAN3D_COMMIT"):
         command.extend(
             ["--build-arg", f"HUNYUAN3D_COMMIT={os.environ['HUNYUAN3D_COMMIT']}"]

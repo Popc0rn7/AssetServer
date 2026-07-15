@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
+from assetserver.artifact_store import Artifact, ArtifactCatalog
 from assetserver.asset_store import (
     AssetStoreError,
     ContentAddressedAssetStore,
@@ -32,6 +33,12 @@ from assetserver.postprocess.collision import (
 )
 from assetserver.postprocess.config import PostprocessConfig
 from assetserver.scene_renderer import SceneRendererClient, SceneRendererError
+from assetserver.runtime_version import (
+    SCENE_IR_MODEL_VERSION,
+    deployed_scene_job_cache_version,
+    runtime_identity,
+    worker_model_version,
+)
 from assetserver.scenes import (
     SceneConflictError,
     SceneNotFoundError,
@@ -185,6 +192,15 @@ class AssetAcquisitionApp:
         self._scene_renderer = scene_renderer
         self._scene_data_root = data_root
         self._scene_output_root = output_root
+        self._artifact_catalog_instance: ArtifactCatalog | None = None
+        self._api_runtime_identity = runtime_identity("api", "embedded")
+        artifact_config = self._server_config().get("artifacts", {})
+        if int(artifact_config.get("observation_retention_days", 30)) < int(
+            artifact_config.get("workflow_retention_days", 30)
+        ):
+            raise ValueError(
+                "observation artifact retention must cover workflow retention"
+            )
         self._advertise_v2_assets = bool(
             asset_store is not None
             or ir_scene_store is not None
@@ -261,6 +277,21 @@ class AssetAcquisitionApp:
         self.app.add_api_route(
             "/v2/assets/{digest}/preview",
             self._asset_preview_v2_endpoint,
+            methods=["GET"],
+        )
+        self.app.add_api_route(
+            "/v2/assets/{digest}/download",
+            self._asset_download_v2_endpoint,
+            methods=["GET"],
+        )
+        self.app.add_api_route(
+            "/v2/artifacts/{artifact_id}",
+            self._get_artifact_endpoint,
+            methods=["GET"],
+        )
+        self.app.add_api_route(
+            "/v2/artifacts/{artifact_id}/content",
+            self._get_artifact_content_endpoint,
             methods=["GET"],
         )
         self.app.add_api_route(
@@ -353,6 +384,14 @@ class AssetAcquisitionApp:
             "enabled_backends": len(self._enabled_backend_specs()),
             "server": self._server_config(),
             "runtime": self._runtime_config(),
+            "versions": {
+                key: self._api_runtime_identity[key]
+                for key in (
+                    "scene_ir_schema_version",
+                    "scene_ir_model_version",
+                    "build_version",
+                )
+            },
         }
 
     async def _create_ir_scene_endpoint(self, request: Request) -> JSONResponse:
@@ -368,7 +407,9 @@ class AssetAcquisitionApp:
             )
         try:
             info = self._ir_scene_store.create(await request.body())
-        except (SceneIRValidationError, IRSceneAssetError) as exc:
+        except SceneIRValidationError as exc:
+            return self._scene_error(422, exc.code, str(exc), details=exc.details)
+        except IRSceneAssetError as exc:
             return self._scene_error(422, "invalid_scene_ir", str(exc))
         return JSONResponse(
             {
@@ -426,7 +467,9 @@ class AssetAcquisitionApp:
             return self._scene_error(409, "scene_revision_conflict", str(exc))
         except IRSceneNotFoundError as exc:
             return self._scene_error(404, "scene_not_found", str(exc))
-        except (SceneIRValidationError, IRSceneAssetError) as exc:
+        except SceneIRValidationError as exc:
+            return self._scene_error(422, exc.code, str(exc), details=exc.details)
+        except IRSceneAssetError as exc:
             return self._scene_error(422, "invalid_scene_ir", str(exc))
         return JSONResponse(
             {
@@ -441,6 +484,17 @@ class AssetAcquisitionApp:
     async def _submit_ir_job_endpoint(
         self, scene_id: str, request: Request, job_type: str
     ) -> JSONResponse:
+        deployed_worker_version = worker_model_version(self._scene_data_root)
+        if (
+            deployed_worker_version is not None
+            and deployed_worker_version != SCENE_IR_MODEL_VERSION
+        ):
+            return self._scene_error(
+                503,
+                "scene_worker_schema_mismatch",
+                "scene worker SceneIR model version does not match the API",
+                retryable=False,
+            )
         try:
             options = await request.json()
         except ValueError as exc:
@@ -460,7 +514,29 @@ class AssetAcquisitionApp:
             revision.revision,
             options,
             max_attempts=int(self._job_config().get("max_attempts", 3)),
+            cache_version=deployed_scene_job_cache_version(self._scene_data_root),
         )
+        if (
+            not created
+            and job_type == "observe"
+            and job.status == "completed"
+            and job.result is not None
+            and any(
+                not self._safe_result_path(
+                    self._scene_data_root, item.get("path")
+                ).is_file()
+                for item in job.result.get("views", [])
+            )
+        ):
+            self._job_store.delete_completed(job.job_id)
+            job, created = self._job_store.submit(
+                job_type,
+                scene_id,
+                revision.revision,
+                options,
+                max_attempts=int(self._job_config().get("max_attempts", 3)),
+                cache_version=deployed_scene_job_cache_version(self._scene_data_root),
+            )
         return JSONResponse(
             {
                 "job_id": job.job_id,
@@ -516,9 +592,32 @@ class AssetAcquisitionApp:
             manifest = json.loads(manifest_path.read_text())
         except (OSError, ValueError) as exc:
             return self._scene_error(500, "observation_result_invalid", str(exc))
+        provenance = manifest.get("provenance") or {
+            "job_id": job.job_id,
+            "scene_id": job.scene_id,
+            "scene_revision": job.scene_revision,
+            "scene_sha256": manifest.get("scene_sha256"),
+            "producer_version": manifest.get("renderer_version"),
+            "render_options": manifest.get("options", {}),
+        }
         for item in manifest.get("views", []):
+            artifact = self._publish_observation_view(job, item, provenance)
             item.pop("path", None)
             item["url"] = f"/v2/observations/{observation_id}/views/{item['view']}"
+            item.update(
+                {
+                    "artifact_id": artifact.artifact_id,
+                    "content_url": artifact.public()["content_url"],
+                    "media_type": artifact.media_type,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
+                }
+            )
+        try:
+            latest_revision = self._ir_scene_store.revision(job.scene_id).revision
+            manifest["stale"] = latest_revision != job.scene_revision
+        except IRSceneNotFoundError:
+            manifest["stale"] = True
         self._assert_path_free(manifest)
         return JSONResponse(manifest)
 
@@ -534,12 +633,19 @@ class AssetAcquisitionApp:
             raise HTTPException(status_code=404, detail="Observation view not found")
         path = self._safe_result_path(self._scene_data_root, selected.get("path"))
         if not path.is_file():
-            raise HTTPException(status_code=404, detail="Observation file not found")
-        media_type = "image/webp" if path.suffix.lower() == ".webp" else "image/png"
-        return Response(
-            path.read_bytes(),
-            media_type=media_type,
-            headers={"Content-Disposition": f'inline; filename="{path.name}"'},
+            return self._artifact_gone()
+        manifest_path = self._safe_result_path(
+            self._scene_data_root, job.result.get("manifest_path")
+        )
+        manifest = json.loads(manifest_path.read_text())
+        manifest_item = next(
+            item for item in manifest.get("views", []) if item.get("view") == view
+        )
+        artifact = self._publish_observation_view(
+            job, manifest_item, manifest.get("provenance") or {}
+        )
+        return self._artifact_content_response(
+            artifact, disposition=f'inline; filename="{path.name}"'
         )
 
     async def _get_export_endpoint(
@@ -550,23 +656,148 @@ class AssetAcquisitionApp:
             self._scene_output_root, job.result.get("zip_path")
         )
         if not path.is_file():
-            raise HTTPException(status_code=404, detail="Export file not found")
+            return self._artifact_gone()
+        artifact = self._publish_job_artifact(job)
+        return self._artifact_content_response(
+            artifact,
+            disposition=f'attachment; filename="{path.name}"',
+            extra_headers={
+                "X-Scene-ID": job.scene_id,
+                "X-Scene-Revision": str(job.scene_revision),
+                "X-Export-SHA256": artifact.sha256,
+            },
+        )
+
+    def _catalog(self) -> ArtifactCatalog:
+        root = self._scene_data_root
+        if self._config is None and root == Path("data"):
+            root = self._asset_store.root.parent
+        expected = root / "artifacts" / "artifacts.sqlite3"
+        if (
+            self._artifact_catalog_instance is None
+            or self._artifact_catalog_instance.path != expected
+        ):
+            self._artifact_catalog_instance = ArtifactCatalog(expected)
+        return self._artifact_catalog_instance
+
+    async def _get_artifact_endpoint(self, artifact_id: str) -> JSONResponse:
+        try:
+            artifact = self._catalog().get(artifact_id)
+        except KeyError:
+            return self._scene_error(
+                404, "artifact_not_found", "artifact does not exist"
+            )
+        if artifact.gone:
+            return self._artifact_gone()
+        payload = artifact.public()
+        self._assert_path_free(payload)
+        return JSONResponse(payload)
+
+    async def _get_artifact_content_endpoint(self, artifact_id: str) -> Response:
+        try:
+            artifact = self._catalog().get(artifact_id)
+        except KeyError:
+            return self._scene_error(
+                404, "artifact_not_found", "artifact does not exist"
+            )
+        if artifact.gone:
+            return self._artifact_gone()
+        return self._artifact_content_response(artifact)
+
+    def _publish_observation_view(
+        self, job: Any, manifest_item: dict[str, Any], provenance: dict[str, Any]
+    ) -> Artifact:
+        view = str(manifest_item["view"])
+        result_item = next(
+            item for item in job.result.get("views", []) if item.get("view") == view
+        )
+        path = self._safe_result_path(self._scene_data_root, result_item.get("path"))
+        media_type = "image/webp" if path.suffix.lower() == ".webp" else "image/png"
+        metadata = {
+            key: manifest_item[key]
+            for key in ("view", "width", "height", "camera_location", "target")
+            if key in manifest_item
+        }
+        return self._catalog().publish(
+            f"observation:{job.job_id}:view:{view}",
+            path,
+            kind="scene_observation_view",
+            media_type=media_type,
+            provenance=provenance,
+            metadata=metadata,
+        )
+
+    def _publish_job_artifact(self, job: Any) -> Artifact:
+        if job.job_type == "export":
+            root = self._scene_output_root
+            relative = job.result.get("zip_path")
+            kind, media_type, version = (
+                "scene_export",
+                "application/zip",
+                "scene-export/v2",
+            )
+        elif job.job_type == "validate":
+            root = self._scene_data_root
+            relative = job.result.get("report_path")
+            kind, media_type, version = (
+                "validation_report",
+                "application/json",
+                "validation-report/v1",
+            )
+        else:
+            raise ValueError(f"job has no single artifact: {job.job_type}")
+        path = self._safe_result_path(root, relative)
+        return self._catalog().publish(
+            f"job:{job.job_id}:{job.job_type}",
+            path,
+            kind=kind,
+            media_type=media_type,
+            provenance={
+                "job_id": job.job_id,
+                "scene_id": job.scene_id,
+                "scene_revision": job.scene_revision,
+                "scene_sha256": job.result.get("scene_sha256"),
+                "producer_version": version,
+            },
+        )
+
+    @staticmethod
+    def _artifact_content_response(
+        artifact: Artifact,
+        *,
+        disposition: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Response:
+        headers = {
+            "Content-Length": str(artifact.size_bytes),
+            "ETag": f'"{artifact.sha256}"',
+            "X-Artifact-SHA256": artifact.sha256,
+            "Cache-Control": "public, immutable, max-age=31536000",
+            **(extra_headers or {}),
+        }
+        if disposition:
+            headers["Content-Disposition"] = disposition
 
         async def chunks():
-            with path.open("rb") as source:
+            with artifact.path.open("rb") as source:
                 while content := source.read(1024 * 1024):
                     yield content
 
         return StreamingResponse(
             chunks(),
-            media_type="application/zip",
-            headers={
-                "X-Scene-ID": job.scene_id,
-                "X-Scene-Revision": str(job.scene_revision),
-                "X-Export-SHA256": str(job.result.get("sha256", "")),
-                "Content-Length": str(path.stat().st_size),
-                "Content-Disposition": f'attachment; filename="{path.name}"',
+            media_type=artifact.media_type,
+            headers=headers,
+        )
+
+    @staticmethod
+    def _artifact_gone() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": "artifact_gone",
+                "message": "artifact content is no longer retained",
+                "retryable": False,
             },
+            status_code=410,
         )
 
     def _completed_result_job(self, job_id: str, expected_type: str):
@@ -590,8 +821,7 @@ class AssetAcquisitionApp:
             raise HTTPException(status_code=500, detail="Invalid result path")
         return path
 
-    @staticmethod
-    def _public_job(job) -> dict[str, Any]:
+    def _public_job(self, job) -> dict[str, Any]:
         allowed_request = {
             key: value
             for key, value in job.request.items()
@@ -621,12 +851,35 @@ class AssetAcquisitionApp:
                     ],
                 }
             elif job.job_type == "export":
+                artifact = self._publish_job_artifact(job)
+                public_artifact = artifact.public()
                 result = {
                     "export_id": job.job_id,
                     "download_url": f"/v2/exports/{job.job_id}",
-                    "sha256": job.result.get("sha256"),
-                    "size_bytes": job.result.get("size_bytes"),
+                    "artifact": public_artifact,
+                    "artifact_id": artifact.artifact_id,
+                    "content_url": public_artifact["content_url"],
+                    "media_type": artifact.media_type,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
                 }
+            elif job.job_type == "validate" and job.result.get("report_path"):
+                artifact = self._publish_job_artifact(job)
+                public_artifact = artifact.public()
+                result = {
+                    key: value
+                    for key, value in job.result.items()
+                    if key != "report_path"
+                }
+                result.update(
+                    {
+                        "artifact": public_artifact,
+                        "artifact_id": artifact.artifact_id,
+                        "media_type": artifact.media_type,
+                        "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }
+                )
             else:
                 result = job.result
         payload = {
@@ -654,7 +907,7 @@ class AssetAcquisitionApp:
             "finished_at": job.finished_at,
             "updated_at": job.updated_at,
         }
-        AssetAcquisitionApp._assert_path_free(payload)
+        self._assert_path_free(payload)
         return payload
 
     def _tools_endpoint(self) -> dict[str, Any]:
@@ -664,6 +917,7 @@ class AssetAcquisitionApp:
                 "retrieve": "/v2/retrieve/{source}",
                 "materialize": "/v2/retrieve/{source}/{candidate_id}/materialize",
                 "assets": "/v2/assets/{digest}",
+                "asset_download": "/v2/assets/{digest}/download",
             }
             if self._advertise_v2_assets
             else {
@@ -691,6 +945,8 @@ class AssetAcquisitionApp:
             result["routes"]["scene_jobs"] = "/v2/jobs/{job_id}"
             result["routes"]["observations"] = "/v2/observations/{observation_id}"
             result["routes"]["exports"] = "/v2/exports/{export_id}"
+            result["routes"]["artifacts"] = "/v2/artifacts/{artifact_id}"
+            result["routes"]["artifact_content"] = "/v2/artifacts/{artifact_id}/content"
         return result
 
     async def _create_scene_endpoint(
@@ -830,10 +1086,20 @@ class AssetAcquisitionApp:
 
     @staticmethod
     def _scene_error(
-        status: int, error: str, message: str, *, retryable: bool = False
+        status: int,
+        error: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
     ) -> JSONResponse:
         return JSONResponse(
-            {"error": error, "message": message, "retryable": retryable},
+            {
+                "error": error,
+                "message": message,
+                "retryable": retryable,
+                **({"details": details} if details else {}),
+            },
             status_code=status,
         )
 
@@ -1056,11 +1322,30 @@ class AssetAcquisitionApp:
         return JSONResponse(public, status_code=201)
 
     async def _asset_v2_endpoint(self, digest: str, request: Request) -> JSONResponse:
+        from asyncio import to_thread
+
         try:
             stored = self._asset_store.resolve(f"asset://sha256/{digest}")
         except AssetStoreError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         payload = self._public_asset(stored)
+        packaged = await to_thread(self._asset_store.package, stored.asset_ref)
+        package_artifact = self._catalog().publish(
+            f"asset:{digest}:package",
+            packaged.path,
+            kind="asset_package",
+            media_type="application/zip",
+            provenance={
+                "asset_ref": stored.asset_ref,
+                "producer_version": stored.manifest.get("schema_version", "asset/v2"),
+            },
+        )
+        payload["package_artifact"] = package_artifact.public()
+        preview = self._asset_store.preview_path(stored.asset_ref)
+        if preview is not None:
+            payload["preview_artifact"] = self._publish_asset_preview(
+                digest, preview, stored
+            ).public()
         self._assert_path_free(payload)
         return JSONResponse(payload)
 
@@ -1074,13 +1359,60 @@ class AssetAcquisitionApp:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if preview is None:
             raise HTTPException(status_code=404, detail="Asset preview not found")
+        artifact = self._publish_asset_preview(digest, preview)
+        return self._artifact_content_response(
+            artifact, disposition=f'inline; filename="{preview.name}"'
+        )
+
+    async def _asset_download_v2_endpoint(
+        self, digest: str, request: Request
+    ) -> Response:
+        from asyncio import to_thread
+
+        asset_ref = f"asset://sha256/{digest}"
+        try:
+            packaged = await to_thread(self._asset_store.package, asset_ref)
+        except AssetStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        artifact = self._catalog().publish(
+            f"asset:{digest}:package",
+            packaged.path,
+            kind="asset_package",
+            media_type="application/zip",
+            provenance={"asset_ref": asset_ref, "producer_version": "asset/v2"},
+        )
+        return self._artifact_content_response(
+            artifact,
+            disposition=f'attachment; filename="asset-{digest}.zip"',
+            extra_headers={
+                "X-Asset-SHA256": digest,
+                "X-Asset-Package-SHA256": artifact.sha256,
+            },
+        )
+
+    def _publish_asset_preview(
+        self, digest: str, preview: Path, stored: StoredAsset | None = None
+    ) -> Artifact:
         media_type = {
             ".png": "image/png",
             ".webp": "image/webp",
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
         }.get(preview.suffix.lower(), "application/octet-stream")
-        return Response(preview.read_bytes(), media_type=media_type)
+        return self._catalog().publish(
+            f"asset:{digest}:preview",
+            preview,
+            kind="asset_preview",
+            media_type=media_type,
+            provenance={
+                "asset_ref": f"asset://sha256/{digest}",
+                "producer_version": (
+                    stored.manifest.get("schema_version", "asset/v2")
+                    if stored is not None
+                    else "asset/v2"
+                ),
+            },
+        )
 
     @staticmethod
     def _public_asset(stored: StoredAsset) -> dict[str, Any]:
@@ -1098,6 +1430,7 @@ class AssetAcquisitionApp:
                 if manifest.get("preview") or metadata.get("preview")
                 else None
             ),
+            "download_url": f"/v2/assets/{stored.digest}/download",
             "source": {
                 key: value
                 for key, value in source.items()
@@ -1122,7 +1455,14 @@ class AssetAcquisitionApp:
                 if key in forbidden_keys:
                     raise RuntimeError(f"internal path field leaked at {field}.{key}")
                 if key == "download_url" and (
-                    not isinstance(item, str) or not item.startswith("/v2/exports/")
+                    not isinstance(item, str)
+                    or not (
+                        item.startswith("/v2/exports/")
+                        or (
+                            item.startswith("/v2/assets/")
+                            and item.endswith("/download")
+                        )
+                    )
                 ):
                     raise RuntimeError(f"model download URL leaked at {field}.{key}")
                 AssetAcquisitionApp._assert_path_free(item, f"{field}.{key}")

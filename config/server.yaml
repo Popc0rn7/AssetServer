@@ -10,6 +10,10 @@ server:
     renderer_url: ${oc.env:ASSETSERVER_RENDERER_URL,null}
   jobs:
     max_attempts: 3
+  artifacts:
+    # Observation content must live at least as long as workflow records.
+    observation_retention_days: ${oc.env:ASSETSERVER_OBSERVATION_RETENTION_DAYS,30}
+    workflow_retention_days: ${oc.env:ASSETSERVER_WORKFLOW_RETENTION_DAYS,30}
 
 openclip: config/openclip.yaml
 

@@ -151,35 +151,33 @@ ENTRYPOINT ["python", "-m", "assetserver.openclip_server.standalone"]
 FROM python-base AS scene-viewer
 ARG BLENDER_VERSION=4.5.4
 ARG DRAKE_VERSION=1.47.0
+ARG IMAGE_VERSION=dev
 ARG PYPI_INDEX_URL=""
 WORKDIR /app
 RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
     && uv pip install \
        --index https://download.blender.org/pypi/ \
        "bpy==${BLENDER_VERSION}" "drake==${DRAKE_VERSION}" \
-       "pydantic>=2" "PyYAML>=6" \
-    && python -c "import bpy, pydrake, pydantic, yaml; print(bpy.app.version_string)"
+       "numpy>=1.26,<2" "trimesh>=4.7.4" \
+       "pydantic>=2" "PyYAML>=6" "Pillow>=10" \
+    && python -c "import bpy, pydrake, pydantic, trimesh, yaml; print(bpy.app.version_string)"
 RUN useradd --create-home --uid 10003 scene-viewer \
     && mkdir -p /var/lib/scene-viewer /var/cache/scene-viewer \
     && chown -R scene-viewer:scene-viewer \
        /var/lib/scene-viewer /var/cache/scene-viewer
 ENV PYTHONPATH=/app \
+    ASSETSERVER_BUILD_VERSION=${IMAGE_VERSION} \
     ASSETSERVER_DATA_ROOT=/data \
     ASSETSERVER_OUTPUT_ROOT=/outputs \
     XDG_CACHE_HOME=/var/cache/scene-viewer/xdg \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
-COPY assetserver/__init__.py \
-     assetserver/asset_store.py \
-     assetserver/blender_scene_worker.py \
-     assetserver/jobs.py \
-     assetserver/job_worker.py \
-     assetserver/scene_compilers.py \
-     assetserver/scene_ir.py \
-     assetserver/scene_job_handlers.py \
-     assetserver/simulation_assets.py \
-     /app/assetserver/
+LABEL org.opencontainers.image.title="AssetServer Scene Worker" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.assetserver.scene-ir-model="scene-ir-v1-procedural-room-shell-v1"
+COPY assetserver /app/assetserver
 COPY scripts/build_scene_from_ir.py /app/scripts/build_scene_from_ir.py
 COPY scripts/smoke_scene_viewer.py /app/scripts/smoke_scene_viewer.py
+COPY scripts/check_procedural_room_canary.py /app/scripts/check_procedural_room_canary.py
 USER scene-viewer
 CMD ["python", "-m", "assetserver.job_worker", "--database", "/data/jobs/jobs.sqlite3", "--handler", "observe=assetserver.scene_job_handlers:observe", "--handler", "validate=assetserver.scene_job_handlers:validate", "--handler", "export=assetserver.scene_job_handlers:export", "--lease-seconds", "300", "--heartbeat-seconds", "30"]
 

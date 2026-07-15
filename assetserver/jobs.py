@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from assetserver.runtime_version import scene_job_cache_version
+
 
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 JobHandler = Callable[["Job"], dict[str, Any]]
@@ -77,14 +79,25 @@ class SQLiteJobStore:
         request: dict[str, Any],
         *,
         max_attempts: int = 3,
+        cache_version: str | None = None,
     ) -> tuple[Job, bool]:
         if not job_type or scene_revision < 1 or max_attempts < 1:
             raise ValueError("invalid job submission")
         request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
-        request_hash = hashlib.sha256(request_json.encode()).hexdigest()
+        cache_identity = json.dumps(
+            {
+                "request": request,
+                "cache_version": cache_version or scene_job_cache_version(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request_hash = hashlib.sha256(cache_identity.encode()).hexdigest()
         now = time.time()
         job_id = str(uuid.uuid4())
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO jobs (
@@ -111,8 +124,46 @@ class SQLiteJobStore:
                        AND scene_revision=? AND request_hash=?""",
                     (job_type, scene_id, scene_revision, request_hash),
                 ).fetchone()
-                return self._job(row), False
-        return self.get(job_id), True
+                if row["status"] not in {"failed", "cancelled"}:
+                    connection.commit()
+                    return self._job(row), False
+                # Keep the terminal job addressable, but vacate its cache key so a
+                # fresh submission can enter the queue. The tombstone is unique and
+                # can never be selected by a future request hash.
+                connection.execute(
+                    "UPDATE jobs SET request_hash=? WHERE job_id=?",
+                    (f"terminal:{row['job_id']}:{request_hash}", row["job_id"]),
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, job_type, scene_id, scene_revision, request_json,
+                        request_hash, status, max_attempts, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        job_type,
+                        scene_id,
+                        scene_revision,
+                        request_json,
+                        request_hash,
+                        max_attempts,
+                        now,
+                        now,
+                    ),
+                )
+                created = cursor.rowcount == 1
+            fresh = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._job(fresh), created
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def get(self, job_id: str) -> Job:
         with self._connect() as connection:
@@ -266,6 +317,14 @@ class SQLiteJobStore:
             if cursor.rowcount != 1:
                 raise ValueError("only queued jobs can be cancelled")
         return self.get(job_id)
+
+    def delete_completed(self, job_id: str) -> bool:
+        """Remove a completed cache record whose retained result has disappeared."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM jobs WHERE job_id=? AND status='completed'", (job_id,)
+            )
+        return cursor.rowcount == 1
 
     def _initialize(self) -> None:
         with self._connect() as connection:

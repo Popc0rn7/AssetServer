@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
+import os
 import signal
 import socket
 import threading
@@ -13,6 +15,10 @@ from collections.abc import Callable
 from typing import Any
 
 from assetserver.jobs import Job, JobHandler, JobWorker, SQLiteJobStore
+from assetserver.runtime_version import register_runtime
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_handler(specification: str) -> tuple[str, JobHandler]:
@@ -29,6 +35,10 @@ def load_handler(specification: str) -> tuple[str, JobHandler]:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     parser = argparse.ArgumentParser(
         description="Run a persistent AssetServer job worker"
     )
@@ -45,6 +55,12 @@ def main() -> None:
 
     handlers = dict(load_handler(value) for value in args.handler)
     worker_id = args.worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+    register_runtime(
+        os.environ.get("ASSETSERVER_DATA_ROOT", "data"),
+        role="scene-worker",
+        instance_id=worker_id,
+        logger=logger,
+    )
     worker = JobWorker(
         SQLiteJobStore(args.database),
         worker_id,
