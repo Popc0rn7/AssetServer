@@ -47,8 +47,8 @@ uv run asset-acquisition-server \
 Build and start the Blender/Drake scene worker:
 
 ```bash
-python3 scripts/docker_service.py build scene-viewer
-python3 scripts/docker_service.py run scene-viewer --gpu 0 --no-follow
+scripts/docker_service.sh build scene-viewer
+scripts/docker_service.sh run scene-viewer --gpu 0 --no-follow
 docker logs --tail 80 assetserver-scene-viewer-worker
 ```
 

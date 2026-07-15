@@ -107,17 +107,35 @@ FastAPI 参数校验、部分代理错误或结果未就绪可能为：
 
 ### `GET /tools`
 
-前端启动时应调用此接口发现可用路由和能力。
+这是稳定能力目录。前端/Agent 用它判断能力的输入、输出和适用范围，但不能用它判断
+worker 此刻是否在线。`enabled=true` 只表示 Gateway 配置了公开路由。
 
 ```json
 {
   "enabled": [
     {
-      "name": "sam3d",
-      "type": "geometry_generation",
-      "role": "generate",
+      "name": "articulated",
+      "type": "articulated",
+      "role": "retrieve",
       "enabled": true,
-      "config": {}
+      "config": {
+        "display_name": "Articulated Objects",
+        "description": "Retrieve simulation-ready articulated objects with joint metadata from the configured local catalog.",
+        "best_for": ["doors", "drawers", "cabinets", "articulated appliances"],
+        "avoid_for": ["surface materials", "complete room shells"],
+        "input_modes": ["text"],
+        "output_kind": "object",
+        "asset_kinds": ["object"],
+        "supports_reference_image": false,
+        "supports_text": true,
+        "supports_articulation": true,
+        "output_traits": ["simulation_ready", "joint_metadata"],
+        "quality": "dataset-dependent",
+        "latency": "medium",
+        "cost": "low",
+        "license": "asset-defined",
+        "tags": ["retrieval", "object", "articulated", "text-search"]
+      }
     }
   ],
   "all": [],
@@ -141,18 +159,86 @@ FastAPI 参数校验、部分代理错误或结果未就绪可能为：
 }
 ```
 
-实际字段取决于部署配置。前端不应硬编码某个 backend 一定启用。
+`enabled[]` 是当前配置启用的能力，`all[]` 还包含 `enabled=false` 的已知能力。两者的
+`config` 都只含公开画像，不含密钥、worker 地址、数据目录或缓存路径。
+
+画像字段语义：
+
+| 字段 | 语义 |
+| --- | --- |
+| `role` | 严格为 `retrieve` 或 `generate`；与对应 v2 路由占位符匹配。 |
+| `name` | 稳定路由名，可直接代入 `{source}` 或 `{backend}`。不要从名字猜能力。 |
+| `description` | 可验证的一句话能力说明。 |
+| `best_for` / `avoid_for` | Agent 的正向与负向选择条件。 |
+| `input_modes` | 能力真实支持的输入模式。 |
+| `output_kind` | 严格输出路由约束，当前为 `object` 或 `material`。 |
+| `asset_kinds` | 可能返回的资产 kind。 |
+| `supports_*` | 真实能力布尔值；未知时为字符串 `unknown` 或省略。 |
+| `output_traits` | 稳定机器可读输出特征。 |
+| `quality` / `latency` / `cost` | 粗粒度选择提示，不是实时指标。 |
+| `license` | `asset-defined` 或 `service-defined`；具体许可仍读取最终 manifest。 |
+| `tags` | 稳定机器可读标签。 |
+
+`materials` 的 `output_kind=material`，不能用于 Scene IR object 获取；`articulated` 的
+`output_kind=object`。实际字段取决于部署配置，前端不应硬编码某个 backend 一定启用。
 
 FastAPI 还提供 `GET /openapi.json` 和交互式 `/docs`。它们适合生成基础 HTTP client，
 但 generate/retrieve 的 backend-specific body 和最终 ZIP 语义仍以本文档及 `/tools` 为准。
 
 ### `GET /backends`
 
-返回当前启用的 backend 声明：
+这是实时运行状态。Gateway 在每次请求时重新探测当前 worker/依赖，不是启动时快照。
+`enabled[]` 与 `/tools.enabled[]` 使用完全相同的 `(role, name)`；`all[]` 额外列出禁用能力，
+因此 retrieve-only 部署会明确把 `sam3d` 等 generate 标为 `disabled` 和
+`available=false`。
 
 ```json
-{"enabled": []}
+{
+  "enabled": [
+    {
+      "name": "articulated",
+      "role": "retrieve",
+      "status": "ready",
+      "available": true,
+      "healthy": true,
+      "queue_depth": 0,
+      "capacity": 4,
+      "estimated_wait_seconds": 0,
+      "latency_ms": 25.0,
+      "rate_limited": false,
+      "maintenance": false,
+      "last_error": null,
+      "updated_at": 1784000000.0
+    }
+  ],
+  "all": [
+    {
+      "name": "sam3d",
+      "role": "generate",
+      "status": "disabled",
+      "available": false,
+      "healthy": false,
+      "queue_depth": null,
+      "capacity": null,
+      "estimated_wait_seconds": null,
+      "latency_ms": null,
+      "rate_limited": false,
+      "maintenance": false,
+      "last_error": "backend is disabled by Gateway configuration",
+      "updated_at": 1784000000.0
+    }
+  ]
+}
 ```
+
+`available` 是能否接收新请求的权威字段。`ready` 表示可选；`busy`/`degraded` 可选但应结合
+队列和等待时间比较；`offline`、`unavailable`、`unhealthy`、`error`、`maintenance`、
+`disabled` 均不可选。队列或容量未知时返回 `null`，不会虚构数字。`updated_at` 是本次刷新
+时间（Unix 秒），每次查询都会更新。
+
+Agent 的选择算法：先按 `/tools.enabled` 的 `role`、`output_kind` 和画像过滤，再以相同
+`(role,name)` 合并 `/backends.enabled`，最后只选择 `available=true` 的记录。不要把
+`enabled`、`healthy` 或某个名字本身当作 `available` 的替代判断。
 
 ### `GET /history`
 
@@ -381,6 +467,7 @@ collision 或 simulation；如何使用包内内容由前端决定。
 | `422` | `postprocess_invalid_asset` | 否 | 该资产缺少有效 simulation/link/mesh；换候选或重新生成。 |
 | `502` | 无法解析 backend 发布的资产 | 通常是 | 可退避重试；持续失败应检查服务。 |
 | `503` | `postprocess_unavailable` | 是 | 指数退避，保留原请求上下文。 |
+| `503` | `backend_unavailable` | 依状态而定 | 刷新 `/backends`；offline 可退避，maintenance/disabled 不自动重试。 |
 
 required 模式下后处理失败不会降级返回 visual triangle mesh。
 
