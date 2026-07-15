@@ -58,12 +58,18 @@ class BackendSpec:
     config: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the public, Agent-facing capability declaration.
+
+        Backend connection details and filesystem paths deliberately remain in
+        ``config`` for Gateway orchestration, but are never part of this public
+        representation.
+        """
         return {
             "name": self.name,
             "type": self.type,
             "role": self.role,
             "enabled": self.enabled,
-            "config": self.config,
+            "config": dict(self.config.get("profile") or {}),
         }
 
 

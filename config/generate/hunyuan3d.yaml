@@ -3,6 +3,24 @@ type: geometry_generation
 role: generate
 enabled: false
 
+profile:
+  display_name: Hunyuan3D
+  description: Generate rigid 3D geometry with the configured Hunyuan3D worker.
+  best_for: [single rigid objects supported by the deployed model]
+  avoid_for: [articulated mechanisms, complete room shells]
+  input_modes: [service-defined]
+  output_kind: object
+  asset_kinds: [object]
+  supports_reference_image: unknown
+  supports_text: unknown
+  supports_articulation: false
+  output_traits: [generated_geometry]
+  quality: model-dependent
+  latency: high
+  cost: high
+  license: service-defined
+  tags: [generation, object, rigid]
+
 server:
   host: 127.0.0.1
   port: 7002

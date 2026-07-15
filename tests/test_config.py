@@ -1,4 +1,8 @@
-from assetserver.config import config_to_container, load_assetserver_config
+from assetserver.config import (
+    config_to_container,
+    enabled_backend_specs,
+    load_assetserver_config,
+)
 
 
 def test_server_config_embeds_scenes_and_loads_openclip_file():
@@ -27,6 +31,18 @@ def test_backend_state_comes_from_child_yaml_files():
         "generate",
         "retrieve",
     ]
-    assert config.backends.sam3d.enabled is True
+    assert config.backends.sam3d.enabled is False
     assert config.backends.materials.enabled is True
     assert config.backends.hunyuan3d.enabled is False
+
+
+def test_backend_public_profiles_exclude_runtime_configuration():
+    specs = {
+        spec.name: spec for spec in enabled_backend_specs(load_assetserver_config())
+    }
+
+    materials = specs["materials"].to_dict()
+    assert materials["config"]["output_kind"] == "material"
+    assert materials["config"]["best_for"]
+    assert "dataset" not in materials["config"]
+    assert "server" not in materials["config"]

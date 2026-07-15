@@ -1,7 +1,25 @@
 name: sam3d
 type: geometry_generation
 role: generate
-enabled: true
+enabled: false
+
+profile:
+  display_name: SAM3D
+  description: Generate a rigid 3D object from a supplied reference image, with an optional text prompt for object-description mode.
+  best_for: [single objects matching a supplied reference image]
+  avoid_for: [text-only requests, articulated mechanisms, complete room shells]
+  input_modes: [reference_image, text_prompt]
+  output_kind: object
+  asset_kinds: [object]
+  supports_reference_image: true
+  supports_text: true
+  supports_articulation: false
+  output_traits: [generated_geometry]
+  quality: model-dependent
+  latency: high
+  cost: high
+  license: service-defined
+  tags: [generation, object, rigid, reference-image]
 
 server:
   host: 127.0.0.1

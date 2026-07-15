@@ -3,6 +3,24 @@ type: hssd_retrieval
 role: retrieve
 enabled: false
 
+profile:
+  display_name: HSSD Objects
+  description: Retrieve rigid 3D objects from the configured HSSD catalog using text search.
+  best_for: [indoor furniture, household objects]
+  avoid_for: [surface materials, articulated mechanisms, complete room shells]
+  input_modes: [text]
+  output_kind: object
+  asset_kinds: [object]
+  supports_reference_image: false
+  supports_text: true
+  supports_articulation: false
+  output_traits: [dataset_geometry]
+  quality: dataset-dependent
+  latency: medium
+  cost: low
+  license: asset-defined
+  tags: [retrieval, object, rigid, text-search]
+
 server:
   host: 127.0.0.1
   port: 7001

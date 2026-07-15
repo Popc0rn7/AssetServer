@@ -4,6 +4,24 @@ role: retrieve
 enabled: true
 embedding_provider: openclip
 
+profile:
+  display_name: Materials
+  description: Retrieve reusable visual surface materials from the configured local catalog.
+  best_for: [wood, metal, fabric, wall and floor finishes]
+  avoid_for: [standalone scene objects, articulated assets]
+  input_modes: [text]
+  output_kind: material
+  asset_kinds: [material]
+  supports_reference_image: false
+  supports_text: true
+  supports_articulation: false
+  output_traits: [reusable_visual_material]
+  quality: dataset-dependent
+  latency: low
+  cost: low
+  license: asset-defined
+  tags: [retrieval, material, text-search]
+
 dataset:
   root: data/materials
   embeddings: data/materials/embeddings

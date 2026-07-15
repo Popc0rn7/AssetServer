@@ -4,6 +4,24 @@ role: retrieve
 enabled: true
 embedding_provider: openclip
 
+profile:
+  display_name: Articulated Objects
+  description: Retrieve simulation-ready articulated objects with joint metadata from the configured local catalog.
+  best_for: [doors, drawers, cabinets, articulated appliances]
+  avoid_for: [surface materials, complete room shells]
+  input_modes: [text]
+  output_kind: object
+  asset_kinds: [object]
+  supports_reference_image: false
+  supports_text: true
+  supports_articulation: true
+  output_traits: [simulation_ready, joint_metadata]
+  quality: dataset-dependent
+  latency: medium
+  cost: low
+  license: asset-defined
+  tags: [retrieval, object, articulated, text-search]
+
 sources:
   artvip:
     enabled: true
