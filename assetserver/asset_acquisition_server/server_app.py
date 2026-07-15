@@ -3,6 +3,7 @@ import time
 import uuid
 import hashlib
 import json
+import inspect
 
 from collections import deque
 from collections.abc import Callable
@@ -63,6 +64,7 @@ console_logger = logging.getLogger(__name__)
 GenerateAssetsHandler = Callable[
     [AssetAcquisitionServerRequest], AssetAcquisitionServerResponse
 ]
+BackendStatusProvider = Callable[[BackendSpec], Any]
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -138,6 +140,13 @@ class GatewayHistoryEntry:
     error: str | None = None
 
 
+class BackendUnavailableError(RuntimeError):
+    def __init__(self, backend: str, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.backend = backend
+        self.retryable = retryable
+
+
 class SceneRenderRequest(BaseModel):
     revision: int | None = Field(default=None, ge=1)
     views: list[str] = Field(
@@ -163,6 +172,7 @@ class AssetAcquisitionApp:
         job_store: SQLiteJobStore | None = None,
         asset_store: ContentAddressedAssetStore | None = None,
         collision_postprocessor: Any | None = None,
+        backend_status_provider: BackendStatusProvider | None = None,
     ) -> None:
         self._generate_assets_handler = generate_assets_handler
         self._config = config
@@ -171,6 +181,7 @@ class AssetAcquisitionApp:
 
             retrieval_engine = RetrievalEngine.from_config(config)
         self._retrieval_engine = retrieval_engine
+        self._backend_status_provider = backend_status_provider
         scene_config = self._scene_config()
         storage_config = self._storage_config()
         data_root = Path(storage_config.get("data_root", "data"))
@@ -229,6 +240,9 @@ class AssetAcquisitionApp:
         self._job_store = job_store
         self._history: deque[GatewayHistoryEntry] = deque(maxlen=HISTORY_MAX_ENTRIES)
         self.app = FastAPI(title="AssetServer")
+        self.app.add_exception_handler(
+            BackendUnavailableError, self._backend_unavailable_handler
+        )
         self._register_routes()
 
     async def __call__(self, scope, receive, send):
@@ -1103,10 +1117,20 @@ class AssetAcquisitionApp:
             status_code=status,
         )
 
-    def _backends_endpoint(self) -> dict[str, Any]:
-        backends = self._enabled_backend_specs()
+    async def _backends_endpoint(self) -> dict[str, Any]:
+        from asyncio import gather
+
+        all_specs = self._backend_specs()
+        statuses = await gather(
+            *(self._backend_runtime_status(spec) for spec in all_specs)
+        )
         return {
-            "enabled": [backend.to_dict() for backend in backends],
+            "enabled": [
+                status
+                for spec, status in zip(all_specs, statuses, strict=True)
+                if spec.enabled
+            ],
+            "all": statuses,
         }
 
     def _history_endpoint(self) -> dict[str, Any]:
@@ -1163,7 +1187,7 @@ class AssetAcquisitionApp:
         self, backend: str, request: Request
     ) -> JSONResponse:
         """Forward conditioning data only; the producer publishes shared assets."""
-        spec = self._require_backend(backend, expected_role="generate")
+        spec = await self._require_available_backend(backend, expected_role="generate")
         try:
             upstream = self._upstream_url(spec, "/v2/generations")
             headers = self._forward_headers(request, str(uuid.uuid4()))
@@ -1206,6 +1230,9 @@ class AssetAcquisitionApp:
     async def _retrieve_v2_endpoint(
         self, source: str, request: Request
     ) -> JSONResponse:
+        await self._require_available_backend_if_configured(
+            source, expected_role="retrieve"
+        )
         try:
             data = await request.json()
             if not isinstance(data, dict):
@@ -1246,6 +1273,9 @@ class AssetAcquisitionApp:
     async def _materialize_v2_endpoint(
         self, source: str, candidate_id: str, request: Request
     ) -> JSONResponse:
+        await self._require_available_backend_if_configured(
+            source, expected_role="retrieve"
+        )
         try:
             if self._retrieval_engine is None:
                 return await self._remote_materialize_v2(source, candidate_id, request)
@@ -1723,6 +1753,169 @@ class AssetAcquisitionApp:
             return backend
         raise HTTPException(
             status_code=404, detail=f"Backend not enabled: {backend_name}"
+        )
+
+    async def _require_available_backend(
+        self, backend_name: str, expected_role: str
+    ) -> BackendSpec:
+        backend = self._require_backend(backend_name, expected_role=expected_role)
+        status = await self._backend_runtime_status(backend)
+        if not status["available"]:
+            raise BackendUnavailableError(
+                backend.name,
+                status.get("last_error") or f"backend '{backend.name}' is unavailable",
+                retryable=status.get("status") not in {"disabled", "maintenance"},
+            )
+        return backend
+
+    async def _require_available_backend_if_configured(
+        self, backend_name: str, expected_role: str
+    ) -> BackendSpec | None:
+        # Config-less embedded apps are retained for tests and legacy library use.
+        # A configured Gateway always enforces the public runtime contract.
+        if self._config is None:
+            return None
+        return await self._require_available_backend(backend_name, expected_role)
+
+    async def _backend_runtime_status(self, backend: BackendSpec) -> dict[str, Any]:
+        refreshed_at = time.time()
+        if not backend.enabled:
+            return self._normalized_backend_status(
+                backend,
+                {
+                    "status": "disabled",
+                    "available": False,
+                    "healthy": False,
+                    "last_error": "backend is disabled by Gateway configuration",
+                },
+                refreshed_at,
+            )
+        started = time.perf_counter()
+        try:
+            if self._backend_status_provider is not None:
+                supplied = self._backend_status_provider(backend)
+                raw = await supplied if inspect.isawaitable(supplied) else supplied
+            else:
+                raw = await self._probe_backend(backend)
+        except Exception as exc:
+            console_logger.warning(
+                "backend status provider failed for %s: %s", backend.name, exc
+            )
+            raw = {
+                "status": "offline",
+                "available": False,
+                "healthy": False,
+                "last_error": "backend health probe failed",
+            }
+        if not isinstance(raw, dict):
+            raw = {
+                "status": "error",
+                "available": False,
+                "healthy": False,
+                "last_error": "backend status provider returned an invalid response",
+            }
+        raw.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
+        return self._normalized_backend_status(backend, raw, refreshed_at)
+
+    async def _probe_backend(self, backend: BackendSpec) -> dict[str, Any]:
+        if backend.role == "retrieve" and backend.name in {"materials", "articulated"}:
+            sources = getattr(self._retrieval_engine, "sources", {})
+            if backend.name not in sources:
+                return {
+                    "status": "offline",
+                    "available": False,
+                    "healthy": False,
+                    "last_error": "retrieval source is not loaded",
+                }
+            openclip = (
+                self._config.get("openclip", {}) if self._config is not None else {}
+            )
+            server = openclip.get("server", {})
+            return await self._probe_http_health(
+                str(server.get("host", "127.0.0.1")),
+                int(server.get("port", 7006)),
+                "/health/ready",
+            )
+        server = backend.config.get("server") or {}
+        host, port = server.get("host"), server.get("port")
+        if not host or not port:
+            return {
+                "status": "offline",
+                "available": False,
+                "healthy": False,
+                "last_error": "backend has no runtime endpoint",
+            }
+        health_path = "/health/ready" if backend.role == "generate" else "/health"
+        return await self._probe_http_health(str(host), int(port), health_path)
+
+    @staticmethod
+    async def _probe_http_health(host: str, port: int, path: str) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
+                response = await client.get(f"http://{host}:{port}{path}")
+            payload = response.json() if response.content else {}
+            if response.status_code < 400:
+                status = str(payload.get("status", "ready")).lower()
+                available = status in {"ready", "healthy", "busy", "degraded", "live"}
+                return {
+                    "status": "ready" if status in {"healthy", "live"} else status,
+                    "available": available,
+                    "healthy": status in {"ready", "healthy", "live"},
+                    "queue_depth": payload.get("queue_depth"),
+                    "capacity": payload.get("capacity"),
+                    "estimated_wait_seconds": payload.get("estimated_wait_seconds"),
+                    "rate_limited": bool(payload.get("rate_limited", False)),
+                    "maintenance": bool(payload.get("maintenance", False)),
+                    "last_error": payload.get("last_error"),
+                }
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            return {
+                "status": "offline",
+                "available": False,
+                "healthy": False,
+                "last_error": str(
+                    detail or f"health probe returned HTTP {response.status_code}"
+                ),
+            }
+        except Exception as exc:
+            console_logger.debug("backend health probe failed: %s", exc)
+            return {
+                "status": "offline",
+                "available": False,
+                "healthy": False,
+                "last_error": "backend process is not running",
+            }
+
+    @staticmethod
+    def _normalized_backend_status(
+        backend: BackendSpec, raw: dict[str, Any], updated_at: float
+    ) -> dict[str, Any]:
+        available = bool(raw.get("available", False))
+        status = str(raw.get("status") or ("ready" if available else "offline"))
+        return {
+            "name": backend.name,
+            "role": backend.role,
+            "status": status,
+            "available": available,
+            "healthy": bool(raw.get("healthy", available)),
+            "queue_depth": raw.get("queue_depth"),
+            "capacity": raw.get("capacity"),
+            "estimated_wait_seconds": raw.get("estimated_wait_seconds"),
+            "latency_ms": raw.get("latency_ms"),
+            "rate_limited": bool(raw.get("rate_limited", False)),
+            "maintenance": bool(raw.get("maintenance", status == "maintenance")),
+            "last_error": raw.get("last_error"),
+            "updated_at": updated_at,
+        }
+
+    async def _backend_unavailable_handler(
+        self, request: Request, exc: BackendUnavailableError
+    ) -> JSONResponse:
+        return self._scene_error(
+            503,
+            "backend_unavailable",
+            str(exc),
+            retryable=exc.retryable,
         )
 
     def _upstream_url(self, backend: BackendSpec, upstream_path: str) -> str:
