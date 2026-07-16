@@ -24,6 +24,7 @@ wheels/
 /checkpoints
 /data
 /outputs
+/thirdparty/
 
 # OS
 .DS_Store

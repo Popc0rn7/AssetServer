@@ -4,14 +4,58 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import threading
 import logging
+import types
 
 from pathlib import Path
 
 from .model_bundle import ModelBundle, validate_bundle
 
 logger = logging.getLogger(__name__)
+
+
+def install_kaolin_testing_shim() -> None:
+    """Provide the only Kaolin helper used by SAM3D inference.
+
+    Upstream SAM3D imports ``kaolin.utils.testing.check_tensor`` from its
+    FlexiCubes implementation. Building the complete Kaolin 0.17 CUDA package
+    is unnecessary for this shape check and is not Python 3.11 compatible.
+    """
+    try:
+        from kaolin.utils.testing import check_tensor as _check_tensor  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    def check_tensor(tensor, shape=None, dtype=None, device=None, throw=True):
+        error = None
+        if shape is not None and len(shape) != tensor.ndim:
+            error = f"tensor has {tensor.ndim} dimensions, expected {len(shape)}"
+        elif shape is not None:
+            for index, dimension in enumerate(shape):
+                if dimension is not None and tensor.shape[index] != dimension:
+                    error = f"tensor shape is {tensor.shape}, expected {shape}"
+                    break
+        if error is None and dtype is not None and dtype != tensor.dtype:
+            error = f"tensor dtype is {tensor.dtype}, expected {dtype}"
+        if error is None and device is not None and device != tensor.device.type:
+            error = f"tensor device is {tensor.device.type}, expected {device}"
+        if error is not None and throw:
+            raise ValueError(error)
+        return error is None
+
+    kaolin = types.ModuleType("kaolin")
+    utils = types.ModuleType("kaolin.utils")
+    testing = types.ModuleType("kaolin.utils.testing")
+    testing.check_tensor = check_tensor
+    utils.testing = testing
+    kaolin.utils = utils
+    sys.modules.setdefault("kaolin", kaolin)
+    sys.modules.setdefault("kaolin.utils", utils)
+    sys.modules.setdefault("kaolin.utils.testing", testing)
 
 
 def ensure_runtime_cache_dirs(cache_root: str | Path) -> None:
@@ -102,6 +146,7 @@ class SAM3DRuntime:
 
     def _preload(self) -> None:
         try:
+            install_kaolin_testing_shim()
             force_local_dinov2_hub(
                 os.environ.get("SAM3D_DINOV2_SOURCE", "/opt/dinov2")
             )
