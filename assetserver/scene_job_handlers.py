@@ -506,6 +506,10 @@ def _aggregate_penetration_contacts(
 
 def validate(job: Job) -> dict[str, Any]:
     """Run physical validation and publish its canonical JSON report bytes."""
+    if job.request.get("profile") == "room-placement/v1":
+        from assetserver.placement.engine import validate as placement_validate
+
+        return placement_validate(job)
     result = _validate_result(job)
     data_root, _ = _roots()
     scene, assets = _load(job, data_root)

@@ -135,6 +135,7 @@ class ContentAddressedAssetStore:
         bounds: dict[str, Any] | None = None,
         joints: list[dict[str, Any]] | None = None,
         support_surfaces: list[dict[str, Any]] | None = None,
+        placement_profile: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         source: dict[str, Any] | None = None,
         source_frame: dict[str, Any] | None = None,
@@ -209,6 +210,27 @@ class ContentAddressedAssetStore:
         bounds_record = self._validate_bounds(bounds)
         joints_record = self._validate_joints(joints or [])
         surfaces_record = self._validate_surfaces(support_surfaces or [])
+        if kind == "object":
+            from assetserver.placement.profile import (
+                PROFILE_ENTRYPOINT,
+                baseline_profile,
+                placement_manifest,
+            )
+
+            existing_profile = normalized.get(PROFILE_ENTRYPOINT)
+            if placement_profile is None and existing_profile is not None:
+                try:
+                    profile = json.loads(existing_profile)
+                except (TypeError, ValueError) as exc:
+                    raise AssetStoreError("invalid placement profile") from exc
+            else:
+                profile = placement_profile or baseline_profile(
+                    bounds_record, support_surfaces=surfaces_record
+                )
+            placement_record, placement_content = placement_manifest(profile)
+            normalized[PROFILE_ENTRYPOINT] = placement_content
+        else:
+            placement_record = None
         if simulation_record is not None:
             base_link = simulation_record.get("base_link")
             if not isinstance(base_link, str) or not base_link:
@@ -242,6 +264,7 @@ class ContentAddressedAssetStore:
             "bounds": bounds_record,
             "joints": joints_record,
             "support_surfaces": surfaces_record,
+            "placement": placement_record,
             "license": ({"name": license} if isinstance(license, str) else dict(license or {})),
             "tool_versions": {str(k): str(v) for k, v in sorted((tool_versions or {}).items())},
             "metadata": dict(metadata or {}),
@@ -319,6 +342,22 @@ class ContentAddressedAssetStore:
             return None
         path = self.file_path(asset.root, preview)
         return path if path.is_file() else None
+
+    def placement_profile(self, asset_ref: str) -> dict[str, Any] | None:
+        asset = self.resolve(asset_ref)
+        placement = asset.manifest.get("placement")
+        if not isinstance(placement, dict):
+            return None
+        path = self.file_path(asset.root, placement.get("entrypoint", ""))
+        if not path.is_file() or _file_sha256(path) != placement.get("sha256"):
+            raise AssetStoreError("placement profile checksum mismatch")
+        try:
+            profile = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise AssetStoreError("invalid placement profile") from exc
+        from assetserver.placement.profile import public_profile
+
+        return public_profile(profile, asset_ref)
 
     def package(self, asset_ref: str) -> PackagedAsset:
         """Build a deterministic, portable ZIP for an immutable asset.

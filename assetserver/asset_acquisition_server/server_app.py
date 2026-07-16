@@ -17,7 +17,7 @@ import httpx
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
 from assetserver.artifact_store import Artifact, ArtifactCatalog
@@ -46,7 +46,13 @@ from assetserver.scenes import (
     ScenePackageError,
     SceneStore,
 )
-from assetserver.scene_ir import SceneIR, SceneIRValidationError
+from assetserver.scene_ir import SceneIR, SceneIRValidationError, load_scene_yaml
+from assetserver.placement.models import (
+    PlacementProposalRequest,
+    PlacementRepairRequest,
+    PlacementSchemaError,
+    RoomPlacementValidationRequest,
+)
 from assetserver.scene_ir_store import (
     IRSceneAssetError,
     IRSceneConflictError,
@@ -366,6 +372,16 @@ class AssetAcquisitionApp:
                 methods=["POST"],
             )
             self.app.add_api_route(
+                "/v2/scenes/{scene_id}/placement-proposals",
+                self._submit_proposal_job_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
+                "/v2/scenes/{scene_id}/placement-repairs",
+                self._submit_repair_job_endpoint,
+                methods=["POST"],
+            )
+            self.app.add_api_route(
                 "/v2/scenes/{scene_id}/exports",
                 self._submit_export_job_endpoint,
                 methods=["POST"],
@@ -572,7 +588,86 @@ class AssetAcquisitionApp:
     async def _submit_validate_job_endpoint(
         self, scene_id: str, request: Request
     ) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("profile") == "room-placement/v1":
+            return await self._submit_typed_placement_job(
+                scene_id, payload, RoomPlacementValidationRequest, "validate"
+            )
         return await self._submit_ir_job_endpoint(scene_id, request, "validate")
+
+    async def _submit_proposal_job_endpoint(
+        self, scene_id: str, request: Request
+    ) -> JSONResponse:
+        return await self._submit_typed_placement_job(
+            scene_id, await self._json_object(request), PlacementProposalRequest,
+            "placement_proposal",
+        )
+
+    async def _submit_repair_job_endpoint(
+        self, scene_id: str, request: Request
+    ) -> JSONResponse:
+        return await self._submit_typed_placement_job(
+            scene_id, await self._json_object(request), PlacementRepairRequest,
+            "placement_repair",
+        )
+
+    @staticmethod
+    async def _json_object(request: Request) -> dict[str, Any]:
+        try:
+            value = await request.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON object")
+        return value
+
+    async def _submit_typed_placement_job(
+        self, scene_id: str, payload: dict[str, Any], model, job_type: str
+    ) -> JSONResponse:
+        try:
+            parsed = model.model_validate(payload)
+        except (ValidationError, PlacementSchemaError) as exc:
+            message = str(exc)
+            code = (
+                "unsupported_placement_constraint"
+                if "unsupported placement constraint" in message
+                else "invalid_placement_intent"
+            )
+            return self._scene_error(422, code, message)
+        try:
+            revision = self._ir_scene_store.revision(scene_id, parsed.revision)
+            scene = load_scene_yaml(self._ir_scene_store.read(scene_id, parsed.revision))
+        except IRSceneNotFoundError as exc:
+            return self._scene_error(404, "scene_not_found", str(exc))
+        if revision.sha256 != parsed.scene_sha256:
+            return self._scene_error(
+                409, "scene_revision_conflict",
+                "submitted scene_sha256 does not match the requested revision",
+            )
+        known = {item.id for item in scene.objects}
+        locked = set(getattr(parsed, "locked_object_ids", []))
+        for intent in parsed.intents:
+            if intent.object_id not in known:
+                return self._scene_error(422, "invalid_placement_intent", f"unknown object: {intent.object_id}")
+            locked.update(intent.locked_object_ids)
+        unknown_locked = sorted(locked - known)
+        if unknown_locked:
+            return self._scene_error(422, "invalid_locked_object", f"unknown locked objects: {unknown_locked}")
+        request_value = parsed.model_dump(mode="json", exclude={"revision"})
+        job, created = self._job_store.submit(
+            job_type, scene_id, revision.revision, request_value,
+            max_attempts=int(self._job_config().get("max_attempts", 3)),
+            cache_version=deployed_scene_job_cache_version(self._scene_data_root),
+        )
+        return JSONResponse({
+            "job_id": job.job_id, "job_type": job.job_type,
+            "scene_id": job.scene_id, "scene_revision": job.scene_revision,
+            "scene_sha256": revision.sha256, "status": job.status,
+            "status_url": f"/v2/jobs/{job.job_id}", "deduplicated": not created,
+        }, status_code=202)
 
     async def _submit_export_job_endpoint(
         self, scene_id: str, request: Request
@@ -758,6 +853,20 @@ class AssetAcquisitionApp:
                 "application/json",
                 "validation-report/v1",
             )
+        elif job.job_type in {"placement_proposal", "placement_repair"}:
+            root = self._scene_data_root
+            relative = job.result.get("result_path")
+            kind = (
+                "placement_proposals"
+                if job.job_type == "placement_proposal"
+                else "scene_patch"
+            )
+            media_type = "application/json"
+            version = (
+                "placement-proposals/v1"
+                if job.job_type == "placement_proposal"
+                else "scene-patch/v1"
+            )
         else:
             raise ValueError(f"job has no single artifact: {job.job_type}")
         path = self._safe_result_path(root, relative)
@@ -850,6 +959,8 @@ class AssetAcquisitionApp:
                 "support_contact_tolerance",
             }
         }
+        if job.job_type in {"placement_proposal", "placement_repair"}:
+            allowed_request = job.request
         result = None
         if job.result is not None:
             if job.job_type == "observe":
@@ -894,6 +1005,10 @@ class AssetAcquisitionApp:
                         "size_bytes": artifact.size_bytes,
                     }
                 )
+            elif job.job_type in {"placement_proposal", "placement_repair"} and job.result.get("result_path"):
+                artifact = self._publish_job_artifact(job)
+                result = {key: value for key, value in job.result.items() if key != "result_path"}
+                result["artifact"] = artifact.public()
             else:
                 result = job.result
         payload = {
@@ -1449,7 +1564,7 @@ class AssetAcquisitionApp:
         manifest = stored.manifest
         metadata = manifest.get("metadata") or {}
         source = manifest.get("source") or {}
-        return {
+        payload = {
             "asset_ref": stored.asset_ref,
             "kind": manifest.get("kind", "object"),
             "category": metadata.get("category", "unknown"),
@@ -1476,6 +1591,16 @@ class AssetAcquisitionApp:
             "articulation": _articulation(manifest.get("joints") or []),
             "license": manifest.get("license") or {},
         }
+        placement = manifest.get("placement")
+        if isinstance(placement, dict):
+            path = ContentAddressedAssetStore.file_path(
+                stored.root, placement["entrypoint"]
+            )
+            profile = json.loads(path.read_text())
+            from assetserver.placement.profile import public_profile
+
+            payload["placement_profile"] = public_profile(profile, stored.asset_ref)
+        return payload
 
     @staticmethod
     def _assert_path_free(value: Any, field: str = "response") -> None:

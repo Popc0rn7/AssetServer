@@ -18,6 +18,7 @@ SCENE_IR_MODEL_VERSION = f"{SCHEMA_VERSION}+{GENERATOR_VERSION}"
 SCENE_JOB_IMPLEMENTATION_VERSION = (
     f"{SCENE_IR_MODEL_VERSION}+renderer=scene-ir-eevee/v2"
     "+validator=validation-report/v1+exporter=scene-export/v2"
+    "+placement-analyzer=1+placement-validator=1+placement-solver=1+placement-repair=1"
 )
 
 
