@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 PYTHON="${ASSETSERVER_MODEL_PYTHON:-$PWD/.venv/bin/python}"
 STATE_ROOT="${ASSETSERVER_MODEL_STATE_ROOT:-$PWD/data/runtime/model-services}"
 LOG_ROOT="${ASSETSERVER_MODEL_LOG_ROOT:-$PWD/data/logs/model-services}"
-THIRDPARTY_ROOT="${THIRDPARTY_ROOT:-$PWD/thirdparty}"
 OPENCLIP_GPU="${OPENCLIP_GPU:-0}"
 SAM3D_GPU="${SAM3D_GPU:-1}"
 OPENCLIP_READY_TIMEOUT="${OPENCLIP_READY_TIMEOUT:-300}"
@@ -127,33 +126,14 @@ start_one() {
             >"$logfile" 2>&1 &
         timeout="$OPENCLIP_READY_TIMEOUT"
     else
-        for source in SAM3 sam-3d-objects dinov2; do
-            [ -d "$THIRDPARTY_ROOT/$source" ] || {
-                echo "error: missing $THIRDPARTY_ROOT/$source" >&2
-                echo "run: scripts/fetch_model_sources.sh all" >&2
-                return 1
-            }
-        done
         "$PYTHON" -c 'import torch, nvdiffrast, pytorch3d, gsplat' >/dev/null || {
             echo "error: SAM3D dependencies are missing; run uv sync --extra sam3d" >&2
             return 1
         }
-        local cache="$PWD/data/cache/sam3d-local"
-        mkdir -p "$cache" "$PWD/data/sam3d-v1" \
-            "$PWD/data/assets" "$PWD/data/jobs/staging"
         nohup env \
             CUDA_VISIBLE_DEVICES="$gpu" \
-            SAM3D_MODEL_ROOT="$PWD/checkpoints" \
-            SAM3D_DINOV2_SOURCE="$THIRDPARTY_ROOT/dinov2" \
-            SAM3D_ASSET_ROOT="$PWD/data/sam3d-v1" \
-            ASSETSERVER_ASSET_ROOT="$PWD/data/assets" \
-            ASSETSERVER_STAGING_ROOT="$PWD/data/jobs/staging" \
-            XDG_CACHE_HOME="$cache/xdg" XDG_CONFIG_HOME="$cache/config" \
-            MPLCONFIGDIR="$cache/matplotlib" HF_HOME="$cache/hf" \
-            TORCH_HOME="$cache/torch" TORCH_EXTENSIONS_DIR="$cache/torch-extensions" \
-            HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-            PYTHONPATH="$PWD:$THIRDPARTY_ROOT/SAM3:$THIRDPARTY_ROOT/sam-3d-objects" \
-            "$PYTHON" -m assetserver.sam3d_server.standalone \
+            "$PYTHON" -m assetserver.generation_server.standalone \
+            --config "$PWD/config/generate/sam3d.yaml" --host 0.0.0.0 \
             >"$logfile" 2>&1 &
         timeout="$SAM3D_READY_TIMEOUT"
     fi

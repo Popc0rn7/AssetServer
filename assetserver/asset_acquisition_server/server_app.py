@@ -123,16 +123,6 @@ def _articulation(joints: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def rewrite_sam3d_download_url(data: dict[str, Any]) -> dict[str, Any]:
-    rewritten = dict(data)
-    asset = dict(rewritten.get("asset") or {})
-    asset_id = asset.get("asset_id")
-    if asset_id:
-        asset["download_url"] = f"/v1/assets/sam3d/{asset_id}"
-        rewritten["asset"] = asset
-    return rewritten
-
-
 @dataclass
 class GatewayHistoryEntry:
     request_id: str
@@ -261,21 +251,6 @@ class AssetAcquisitionApp:
         self.app.add_api_route("/history", self._history_endpoint, methods=["GET"])
         self.app.add_api_route("/shutdown", self._shutdown_endpoint, methods=["POST"])
         self.app.add_api_route(
-            "/generate/{backend_name}",
-            self._proxy_generate_endpoint,
-            methods=["POST"],
-        )
-        self.app.add_api_route(
-            "/v1/generate/sam3d",
-            self._proxy_sam3d_generate_endpoint,
-            methods=["POST"],
-        )
-        self.app.add_api_route(
-            "/v1/assets/sam3d/{asset_id}",
-            self._proxy_sam3d_asset_endpoint,
-            methods=["GET"],
-        )
-        self.app.add_api_route(
             "/v1/retrieve/{source}",
             self._retrieve_v1_endpoint,
             methods=["POST"],
@@ -318,9 +293,6 @@ class AssetAcquisitionApp:
             "/v1/assets/{source}/{asset_id}",
             self._retrieve_asset_v1_endpoint,
             methods=["GET"],
-        )
-        self.app.add_api_route(
-            "/generate_assets", self._generate_assets_endpoint, methods=["POST"]
         )
         self.app.add_api_route(
             "/assets/{asset_id}", self._asset_endpoint, methods=["GET"]
@@ -1050,7 +1022,7 @@ class AssetAcquisitionApp:
             }
             if self._advertise_v2_assets
             else {
-                "generate": "/generate/{backend}",
+                "generate": "/v2/generate/{backend}",
                 "retrieve": "/v1/retrieve/{source}",
                 "assets": "/v1/assets/{source}/{asset_id}",
             }
@@ -1060,7 +1032,6 @@ class AssetAcquisitionApp:
             "all": [backend.to_dict() for backend in self._backend_specs()],
             "routes": acquisition_routes,
             "deprecated_routes": {
-                "generate": "/generate/{backend}",
                 "retrieve": "/v1/retrieve/{source}",
                 "assets": "/v1/assets/{source}/{asset_id}",
             },
@@ -1253,50 +1224,6 @@ class AssetAcquisitionApp:
 
     def _shutdown_endpoint(self) -> dict[str, str]:
         return {"status": "shutdown_requested"}
-
-    async def _proxy_generate_endpoint(
-        self, backend_name: str, request: Request
-    ) -> Response:
-        backend = self._require_backend(
-            backend_name=backend_name,
-            expected_role="generate",
-        )
-        return await self._proxy_request(
-            request=request,
-            backend=backend,
-            upstream_path="/generate_geometries",
-        )
-
-    async def _proxy_sam3d_generate_endpoint(self, request: Request) -> JSONResponse:
-        backend = self._require_backend("sam3d", expected_role="generate")
-        upstream_url = self._upstream_url(backend, "/v1/sam3d/generations")
-        headers = self._forward_headers(request, str(uuid.uuid4()))
-        timeout = httpx.Timeout(UPSTREAM_TIMEOUT_S)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(
-                upstream_url, content=await request.body(), headers=headers
-            )
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=502, detail="invalid SAM3D response"
-            ) from exc
-        if response.status_code >= 400:
-            return JSONResponse(data, status_code=response.status_code)
-        return JSONResponse(
-            rewrite_sam3d_download_url(data), headers=self._v1_deprecation_headers()
-        )
-
-    async def _proxy_sam3d_asset_endpoint(
-        self, asset_id: str, request: Request
-    ) -> Response:
-        backend = self._require_backend("sam3d", expected_role="generate")
-        return await self._proxy_request(
-            request=request,
-            backend=backend,
-            upstream_path=f"/v1/sam3d/assets/{asset_id}",
-        )
 
     async def _generate_v2_endpoint(
         self, backend: str, request: Request
@@ -1701,79 +1628,6 @@ class AssetAcquisitionApp:
             "Deprecation": "true",
             "Link": '</tools>; rel="successor-version"',
         }
-
-    async def _generate_assets_endpoint(self, request: Request) -> Any:
-        if self._generate_assets_handler is None:
-            backend = await self._select_generate_assets_backend(request)
-            return await self._proxy_request(
-                request=request,
-                backend=backend,
-                upstream_path="/generate_geometries",
-            )
-
-        try:
-            data = await request.json()
-            request = AssetAcquisitionServerRequest.from_dict(data)
-            request.validate()
-            response = self._generate_assets_handler(request)
-            return response.to_dict()
-        except HTTPException:
-            raise
-        except Exception as e:
-            console_logger.exception("Asset acquisition request failed")
-            raise HTTPException(status_code=500, detail=str(e)) from e
-
-    async def _select_generate_assets_backend(self, request: Request) -> BackendSpec:
-        """Pick the generate backend for the legacy /generate_assets route.
-
-        In gateway-only mode this route is a compatibility alias for the lower-level
-        generation API. If exactly one generate backend is enabled, use it. If the
-        caller includes "backend" in the JSON body, honor that selection.
-        """
-        requested_backend = await self._requested_backend_from_body(request)
-        if requested_backend:
-            return self._require_backend(
-                backend_name=requested_backend,
-                expected_role="generate",
-            )
-
-        generate_backends = [
-            backend
-            for backend in self._enabled_backend_specs()
-            if backend.role == "generate"
-        ]
-        if len(generate_backends) == 1:
-            return generate_backends[0]
-        if not generate_backends:
-            raise HTTPException(
-                status_code=404,
-                detail="No enabled generate backend is available for /generate_assets",
-            )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Multiple generate backends are enabled; include a 'backend' field "
-                "or use /generate/{backend}."
-            ),
-        )
-
-    async def _requested_backend_from_body(self, request: Request) -> str | None:
-        try:
-            data = await request.json()
-        except Exception:
-            return None
-
-        if isinstance(data, dict):
-            value = data.get("backend") or data.get("backend_name")
-            return str(value) if value else None
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                value = item.get("backend") or item.get("backend_name")
-                if value:
-                    return str(value)
-        return None
 
     def _asset_endpoint(self, asset_id: str) -> FileResponse:
         path = GLOBAL_ARTIFACTS.get(asset_id)

@@ -23,23 +23,18 @@ services:
     container: assetserver-sam3d
     gpu: true
     backend_config: config/generate/sam3d.yaml
+    container_config: /etc/assetserver/backend.yaml
     container_port: 7000
     ready_path: /health/ready
     ready_timeout_s: 900
     model_host: checkpoints
-    model_container: /models
-    model_validator: assetserver.sam3d_server.model_tool
+    model_container: /app/checkpoints
+    model_validator: assetserver.generation_pipelines.sam3d.model_tool
     data: read-write
-    cache_host: data/cache/sam3d
-    cache_container: /var/cache/sam3d
+    data_container: /app/data
     run_as_host: true
     environment:
       HOME: /tmp
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      SAM3D_ASSET_ROOT: /data/sam3d-v1
-      ASSETSERVER_ASSET_ROOT: /data/assets
-      ASSETSERVER_STAGING_ROOT: /data/jobs/staging
 
   openclip:
     target: openclip-runtime
@@ -68,8 +63,9 @@ services:
     container: assetserver-hunyuan3d
     gpu: true
     backend_config: config/generate/hunyuan3d.yaml
+    container_config: /etc/assetserver/backend.yaml
     container_port: 7002
-    ready_path: /health
+    ready_path: /health/ready
     ready_timeout_s: 900
     model_host: checkpoints
     model_container: /models

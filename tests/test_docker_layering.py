@@ -55,9 +55,9 @@ def test_sam3d_runtime_copies_only_its_assetserver_import_closure():
         "FROM builder-base AS openclip-runtime", 1
     )[0]
 
-    assert "assetserver/geometry_generation_server/__init__.py" in runtime
-    assert "assetserver/geometry_generation_server/cuda_env_setup.py" in runtime
-    assert "assetserver/geometry_generation_server/sam3d_pipeline_manager.py" in runtime
+    assert "assetserver/generation_server" in runtime
+    assert "assetserver/generation_pipelines/sam3d" in runtime
+    assert "assetserver/generation_pipelines/hunyuan3d" not in runtime
     assert "assetserver/mesh_utils.py" in runtime
     assert "assetserver/asset_store.py" in runtime
     assert "assetserver/asset_normalization.py" in runtime
@@ -66,7 +66,6 @@ def test_sam3d_runtime_copies_only_its_assetserver_import_closure():
     assert "assetserver/scheduler.py" not in runtime
     assert "COPY assetserver/postprocess" not in runtime
     assert "COPY assetserver/utils" not in runtime
-    assert "assetserver/geometry_generation_server/server_app.py" not in runtime
 
 
 def test_registry_is_the_only_runtime_container_source():
@@ -108,7 +107,7 @@ def test_http_service_host_ports_come_from_backend_configs():
     expected = {
         "sam3d": ("config/generate/sam3d.yaml", 7000, "/health/ready"),
         "openclip": ("config/openclip.yaml", 7006, "/health/ready"),
-        "hunyuan3d": ("config/generate/hunyuan3d.yaml", 7002, "/health"),
+        "hunyuan3d": ("config/generate/hunyuan3d.yaml", 7002, "/health/ready"),
     }
     for name, (config, container_port, ready_path) in expected.items():
         service = registry[name]
@@ -117,6 +116,8 @@ def test_http_service_host_ports_come_from_backend_configs():
         assert service["ready_path"] == ready_path
         assert "port" not in service
         assert "ready_url" not in service
+        if name in {"sam3d", "hunyuan3d"}:
+            assert service["container_config"] == "/etc/assetserver/backend.yaml"
 
 
 def test_gateway_and_local_retrieval_have_no_container_definition():

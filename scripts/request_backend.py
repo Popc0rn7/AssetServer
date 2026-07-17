@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import sys
 
 from pathlib import Path
@@ -70,19 +71,19 @@ def stream_request(url: str, payload: list[dict], timeout: int) -> list[dict]:
 def request_generation(args: argparse.Namespace) -> list[dict]:
     if not args.image_path:
         raise SystemExit(f"--image-path is required for {args.backend}")
-    payload = [
-        {
-            "image_path": str(Path(args.image_path).expanduser()),
-            "output_dir": args.output_dir,
-            "prompt": args.description,
-            "backend": args.backend,
-        }
-    ]
-    return stream_request(
-        f"http://{args.host}:{args.port}/generate_geometries",
-        payload,
-        args.timeout,
-    )
+    image_path = Path(args.image_path).expanduser()
+    media_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+    with image_path.open("rb") as image:
+        response = requests.post(
+            f"http://{args.host}:{args.port}/v2/generate/{args.backend}",
+            files={"image": (image_path.name, image, media_type)},
+            data={"prompt": args.description},
+            timeout=(10, args.timeout),
+        )
+    response.raise_for_status()
+    result = response.json()
+    print(json.dumps(result, indent=2))
+    return [result]
 
 
 def request_retrieval(args: argparse.Namespace) -> list[dict]:
@@ -113,7 +114,9 @@ def request_retrieval(args: argparse.Namespace) -> list[dict]:
 
 def main(default_backend: str | None = None) -> int:
     args = build_parser(default_backend).parse_args()
-    args.port = args.port or DEFAULT_PORTS[args.backend]
+    args.port = args.port or (
+        7010 if args.backend in {"sam3d", "hunyuan3d"} else DEFAULT_PORTS[args.backend]
+    )
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     try:

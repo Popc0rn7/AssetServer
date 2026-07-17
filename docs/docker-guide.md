@@ -168,6 +168,14 @@ those backends until the configured roots and embedding files exist.
 
 ## Commands
 
+Initialize the pinned SAM3D source submodules before building its image. Docker
+copies these directories from the build context and does not clone them during
+the image build:
+
+```bash
+scripts/fetch_model_sources.sh all
+```
+
 ```bash
 scripts/docker_service.sh build sam3d
 scripts/docker_service.sh run sam3d --gpu 0
@@ -206,7 +214,7 @@ intentional cache-free build is required.
 
 | Service | Image | GPU | Runtime mounts |
 | --- | --- | --- | --- |
-| SAM3D | `assetserver/sam3d:dev` | Required | `checkpoints:/models:ro`, `data:/data:rw`, host-owned cache |
+| SAM3D | `assetserver/sam3d:dev` | Required | `checkpoints:/app/checkpoints:ro`, `data:/app/data:rw` |
 | OpenCLIP | `assetserver/openclip:dev` | Required | `checkpoints/open_clip:/models:ro`, named runtime cache |
 | Hunyuan3D | `assetserver/hunyuan3d:dev` | Required | `checkpoints:/models:ro`, `data:/data:rw`, host-owned cache |
 | Scene Viewer | `assetserver/scene-viewer:dev` | Optional | `data:/data:rw`, `data/assets:/data/assets:ro`, `outputs:/outputs:rw` |

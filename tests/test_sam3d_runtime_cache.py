@@ -1,14 +1,13 @@
 import json
 import sys
-import threading
 
 from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
 
-from assetserver.sam3d_server.runtime import (
-    SAM3DRuntime,
+from assetserver.generation_pipelines.sam3d.pipeline import (
+    SAM3DPipeline,
     ensure_runtime_cache_dirs,
     force_local_dinov2_hub,
     seed_dinov2_cache,
@@ -113,7 +112,7 @@ def test_runtime_passes_moge_checkpoint_file_not_snapshot_directory(
         path.write_bytes(b"model")
     pipeline.write_text(yaml.safe_dump({}))
 
-    import assetserver.sam3d_server.model_bundle as model_bundle
+    import assetserver.generation_pipelines.sam3d.model_bundle as model_bundle
 
     manifest = model_bundle.create_manifest(root, "test")
     assert json.loads((root / "model-manifest.json").read_text()) == manifest
@@ -121,27 +120,51 @@ def test_runtime_passes_moge_checkpoint_file_not_snapshot_directory(
     dinov2_source.mkdir()
     (dinov2_source / "hubconf.py").write_text("# local")
     cache = tmp_path / "cache"
-    monkeypatch.setenv("SAM3D_DINOV2_SOURCE", str(dinov2_source))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(cache / "xdg"))
-    monkeypatch.setenv("HF_HOME", str(cache / "hf"))
-    monkeypatch.setenv("TORCH_HOME", str(cache / "torch"))
-    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(cache / "torch-extensions"))
-
-    runtime = SAM3DRuntime(root)
+    runtime = SAM3DPipeline(
+        {
+            "generation": {
+                "model": {"root": str(root)},
+                "sources": {
+                    "sam3": str(tmp_path),
+                    "sam3d_objects": str(tmp_path),
+                    "dinov2": str(dinov2_source),
+                },
+                "cache": {"root": str(cache)},
+                "defaults": {},
+            }
+        }
+    )
+    runtime._prepare_bundle()
 
     assert runtime.bundle.moge_model == moge.resolve()
     assert __import__("os").environ["SAM3D_MOGE_MODEL_PATH"] == str(moge.resolve())
+    assert __import__("os").environ["TORCH_HOME"] == str(cache / "torch")
 
 
-def _ready_runtime() -> SAM3DRuntime:
-    runtime = SAM3DRuntime.__new__(SAM3DRuntime)
+def test_pipeline_requires_configured_thirdparty_sources(tmp_path):
+    runtime = SAM3DPipeline(
+        {
+            "generation": {
+                "model": {"root": str(tmp_path / "models")},
+                "sources": {
+                    "sam3": str(tmp_path / "SAM3"),
+                    "sam3d_objects": str(tmp_path / "sam-3d-objects"),
+                },
+                "cache": {"root": str(tmp_path / "cache")},
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="dinov2"):
+        runtime._prepare_sources()
+
+
+def _ready_runtime() -> SAM3DPipeline:
+    runtime = SAM3DPipeline.__new__(SAM3DPipeline)
     runtime.bundle = SimpleNamespace(
         sam3_checkpoint="sam3.pt", pipeline_config="pipeline.yaml"
     )
-    runtime._ready = True
-    runtime._error = None
-    runtime._lock = threading.Lock()
-    runtime._generation_lock = threading.Lock()
+    runtime.defaults = {"mode": "foreground", "threshold": 0.5}
     return runtime
 
 
@@ -170,7 +193,7 @@ def test_generation_uses_inference_mode_and_releases_cuda_cache(monkeypatch, tmp
     events = []
     calls = []
     manager = ModuleType(
-        "assetserver.geometry_generation_server.sam3d_pipeline_manager"
+        "assetserver.generation_pipelines.sam3d.pipeline_manager"
     )
 
     def generate_with_sam3d(**kwargs):
@@ -181,16 +204,22 @@ def test_generation_uses_inference_mode_and_releases_cuda_cache(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(events))
     monkeypatch.setitem(
         sys.modules,
-        "assetserver.geometry_generation_server.sam3d_pipeline_manager",
+        "assetserver.generation_pipelines.sam3d.pipeline_manager",
         manager,
     )
     monkeypatch.setattr(
-        "assetserver.sam3d_server.runtime.gc.collect",
+        "assetserver.generation_pipelines.sam3d.pipeline.gc.collect",
         lambda: events.append("gc_collect"),
     )
 
     runtime = _ready_runtime()
-    runtime.generate(tmp_path / "input.png", tmp_path / "output.glb", threshold=0.4)
+    from assetserver.generation_server.protocol import GenerationRequest
+
+    runtime.generate(
+        GenerationRequest("id", tmp_path / "input.png", None, {"threshold": 0.4}),
+        tmp_path / "output.glb",
+    )
+    runtime.cleanup_request()
 
     assert events == [
         "inference_enter",
@@ -207,7 +236,7 @@ def test_generation_uses_inference_mode_and_releases_cuda_cache(monkeypatch, tmp
 def test_generation_failure_still_releases_cuda_cache(monkeypatch, tmp_path):
     events = []
     manager = ModuleType(
-        "assetserver.geometry_generation_server.sam3d_pipeline_manager"
+        "assetserver.generation_pipelines.sam3d.pipeline_manager"
     )
 
     def generate_with_sam3d(**_):
@@ -218,15 +247,22 @@ def test_generation_failure_still_releases_cuda_cache(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(events))
     monkeypatch.setitem(
         sys.modules,
-        "assetserver.geometry_generation_server.sam3d_pipeline_manager",
+        "assetserver.generation_pipelines.sam3d.pipeline_manager",
         manager,
     )
     monkeypatch.setattr(
-        "assetserver.sam3d_server.runtime.gc.collect",
+        "assetserver.generation_pipelines.sam3d.pipeline.gc.collect",
         lambda: events.append("gc_collect"),
     )
 
+    from assetserver.generation_server.protocol import GenerationRequest
+
+    runtime = _ready_runtime()
     with pytest.raises(RuntimeError, match="generation failed"):
-        _ready_runtime().generate(tmp_path / "input.png", tmp_path / "output.glb")
+        runtime.generate(
+            GenerationRequest("id", tmp_path / "input.png", None, {}),
+            tmp_path / "output.glb",
+        )
+    runtime.cleanup_request()
 
     assert events[-3:] == ["gc_collect", "synchronize", "empty_cache"]

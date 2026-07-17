@@ -105,6 +105,7 @@ async def test_v2_candidate_and_materialize_contract_never_exposes_paths(
             assert archive.namelist() == [
                 "manifest.json",
                 "collision/hull_000.obj",
+                "placement/profile.json",
                 "visual/model.glb",
             ]
             manifest = json.loads(archive.read("manifest.json"))

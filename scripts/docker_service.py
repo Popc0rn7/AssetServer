@@ -145,12 +145,9 @@ def build(name: str, service: dict[str, Any], args: argparse.Namespace) -> None:
     if name == "sam3d":
         command.extend(["--build-arg", f"TORCH_CUDA_ARCH_LIST={_gpu_architecture()}"])
         for key in (
-            "SAM3_REVISION",
-            "SAM3D_OBJECTS_REVISION",
             "NVDIFFRAST_REVISION",
             "PYTORCH3D_REVISION",
             "MOGE_REVISION",
-            "DINOV2_REVISION",
         ):
             command.extend(["--build-arg", f"{key}={versions[key]}"])
         command.extend(["--build-arg", f"IMAGE_VERSION={revision}"])
@@ -257,13 +254,19 @@ def run_service(name: str, service: dict[str, Any], args: argparse.Namespace) ->
                 f"{(ROOT / str(model_host)).resolve()}:{service['model_container']}:ro",
             ]
         )
+    backend_config = service.get("backend_config")
+    container_config = service.get("container_config")
+    if backend_config and container_config:
+        config_path = (ROOT / str(backend_config)).resolve()
+        command.extend(["-v", f"{config_path}:{container_config}:ro"])
     data_policy = service.get("data")
     if data_policy:
         data = (ROOT / "data").resolve()
         data.mkdir(parents=True, exist_ok=True)
         (data / "assets").mkdir(parents=True, exist_ok=True)
         mode = "rw" if data_policy == "read-write" else "ro"
-        command.extend(["-v", f"{data}:/data:{mode}"])
+        data_container = str(service.get("data_container", "/data"))
+        command.extend(["-v", f"{data}:{data_container}:{mode}"])
         if service.get("assets_read_only"):
             command.extend(["-v", f"{data / 'assets'}:/data/assets:ro"])
     if service.get("outputs"):

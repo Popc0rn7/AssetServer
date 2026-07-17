@@ -1,3 +1,15 @@
 [submodule "submodules/scenesmith"]
 	path = submodules/scenesmith
 	url = https://github.com/nepfaff/scenesmith.git
+[submodule "thirdparty/SAM3"]
+	path = thirdparty/SAM3
+	url = https://github.com/facebookresearch/sam3.git
+	shallow = true
+[submodule "thirdparty/sam-3d-objects"]
+	path = thirdparty/sam-3d-objects
+	url = https://github.com/facebookresearch/sam-3d-objects.git
+	shallow = true
+[submodule "thirdparty/dinov2"]
+	path = thirdparty/dinov2
+	url = https://github.com/facebookresearch/dinov2.git
+	shallow = true

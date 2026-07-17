@@ -13,7 +13,9 @@ def test_sam3d_uses_host_owned_shared_data_without_recursive_chown():
 
     assert service["data"] == "read-write"
     assert service["run_as_host"] is True
-    assert service["environment"]["ASSETSERVER_ASSET_ROOT"] == "/data/assets"
+    assert service["data_container"] == "/app/data"
+    assert service["model_container"] == "/app/checkpoints"
+    assert set(service["environment"]) == {"HOME"}
     assert "os.getuid()" in manager and "os.getgid()" in manager
     assert "chown" not in manager
 
@@ -24,6 +26,17 @@ def test_container_manager_is_the_only_build_run_interface():
     assert not list(Path("scripts").glob("build_*_docker.sh"))
     assert not list(Path("scripts").glob("run_*_docker.sh"))
     assert not Path("scripts/build_sam3d_image.sh").exists()
+
+
+def test_local_sam3d_launcher_uses_authoritative_backend_config():
+    launcher = Path("scripts/model_service.sh").read_text()
+
+    assert "config/generate/sam3d.yaml" in launcher
+    assert "CUDA_VISIBLE_DEVICES" in launcher
+    assert "SAM3D_MODEL_ROOT" not in launcher
+    assert "SAM3D_DINOV2_SOURCE" not in launcher
+    assert "ASSETSERVER_ASSET_ROOT" not in launcher
+    assert launcher.count("PYTHONPATH=") == 1  # OpenCLIP only.
 
 
 def test_sam3d_docker_endpoint_is_derived_from_backend_config(tmp_path, monkeypatch):

@@ -8,7 +8,7 @@ profile:
   description: Generate a rigid 3D object from a supplied reference image, with an optional text prompt for object-description mode.
   best_for: [single objects matching a supplied reference image]
   avoid_for: [text-only requests, articulated mechanisms, complete room shells]
-  input_modes: [reference_image, text_prompt]
+  input_modes: [reference_image]
   output_kind: object
   asset_kinds: [object]
   supports_reference_image: true
@@ -24,3 +24,23 @@ profile:
 server:
   host: 127.0.0.1
   port: 7000
+
+storage:
+  asset_root: data/assets
+  staging_root: data/jobs/staging
+
+generation:
+  pipeline: assetserver.generation_pipelines.sam3d
+  preload: true
+  model:
+    root: checkpoints
+  sources:
+    sam3: thirdparty/SAM3
+    sam3d_objects: thirdparty/sam-3d-objects
+    dinov2: thirdparty/dinov2
+  cache:
+    root: data/cache/sam3d
+  offline: true
+  defaults:
+    mode: foreground
+    threshold: 0.5

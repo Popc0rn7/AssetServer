@@ -40,6 +40,8 @@ class MutableStatusProvider:
 def retrieve_only_gateway(tmp_path):
     provider = MutableStatusProvider()
     config = load_assetserver_config()
+    for backend in config.backends.values():
+        backend.enabled = backend.name in {"materials", "articulated"}
     config.server.storage.data_root = str(tmp_path / "data")
     config.server.storage.output_root = str(tmp_path / "outputs")
     gateway = AssetAcquisitionApp(
@@ -180,3 +182,5 @@ def test_every_available_capability_has_a_public_v2_route(retrieve_only_gateway)
     paths = gateway.app.openapi()["paths"]
     assert "/v2/retrieve/{source}" in paths
     assert "/v2/generate/{backend}" in paths
+    tools = gateway._tools_endpoint()
+    assert "generate" not in tools["deprecated_routes"]

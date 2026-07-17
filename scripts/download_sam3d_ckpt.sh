@@ -10,7 +10,7 @@ without_proxy() {
       HF_ENDPOINT="$HF_MIRROR_ENDPOINT" "$@"
 }
 if [[ "${1:-}" == "--verify" ]]; then
-  exec .venv/bin/python -m assetserver.sam3d_server.model_tool "$CHECKPOINTS"
+  exec .venv/bin/python -m assetserver.generation_pipelines.sam3d.model_tool "$CHECKPOINTS"
 fi
 if [[ $# -ne 0 ]]; then
   echo "Usage: scripts/download_sam3d_ckpt.sh [--verify]" >&2; exit 2
@@ -47,5 +47,5 @@ fi
 echo "$DINO_MODEL_SHA256  $DINO_MODEL" | sha256sum --check --status || {
   echo "DINOv2 checksum mismatch: $DINO_MODEL" >&2; exit 1;
 }
-.venv/bin/python -m assetserver.sam3d_server.model_tool \
+.venv/bin/python -m assetserver.generation_pipelines.sam3d.model_tool \
   --create --bundle-version checkpoints-v1 "$CHECKPOINTS"

@@ -3,7 +3,7 @@ from __future__ import annotations
 # Configure CUDA environment BEFORE any CUDA-dependent imports.
 # This is required for nvdiffrast JIT compilation used by SAM 3D Objects.
 # Must be called before importing torch to ensure environment is set up.
-from assetserver.geometry_generation_server.cuda_env_setup import (
+from assetserver.generation_pipelines.sam3d.cuda_env_setup import (
     ensure_cuda_env,
 )
 
@@ -91,25 +91,10 @@ class SAM3DPipelineManager:
 
         try:
             import os
-            import sys
 
             console_logger.debug("Setting LIDRA_SKIP_INIT=1")
             # Skip sam3d_objects initialization (init module is not present).
             os.environ["LIDRA_SKIP_INIT"] = "1"
-
-            project_root = Path(__file__).resolve().parents[2]
-
-            # Add SAM3 to path.
-            sam3_path = project_root / "external" / "SAM3"
-            if str(sam3_path) not in sys.path:
-                sys.path.insert(0, str(sam3_path))
-            console_logger.debug(f"Added SAM3 path: {sam3_path}")
-
-            # Add SAM 3D Objects to path.
-            sam3d_path = project_root / "external" / "sam-3d-objects"
-            if str(sam3d_path) not in sys.path:
-                sys.path.insert(0, str(sam3d_path))
-            console_logger.debug(f"Added SAM3D path: {sam3d_path}")
 
             console_logger.debug("Importing hydra.utils.instantiate...")
             from hydra.utils import instantiate

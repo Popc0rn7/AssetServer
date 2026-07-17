@@ -6,7 +6,7 @@ JIT compilation of CUDA kernels.
 
 Usage:
     # At the top of any module that uses SAM3D (before other imports)
-    from assetserver.geometry_generation_server import cuda_env_setup
+    from assetserver.generation_pipelines.sam3d import cuda_env_setup
     cuda_env_setup.ensure_cuda_env()
 """
 

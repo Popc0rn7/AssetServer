@@ -56,11 +56,6 @@ def main() -> None:
         cfg.config_path,
         len(enabled_backend_specs(cfg)),
     )
-    console_logger.info(
-        "/generate_assets proxies to the enabled generate backend when no "
-        "AssetManager handler is wired."
-    )
-
     try:
         while server.is_running():
             time.sleep(1)

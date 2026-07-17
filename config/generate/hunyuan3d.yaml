@@ -8,11 +8,11 @@ profile:
   description: Generate rigid 3D geometry with the configured Hunyuan3D worker.
   best_for: [single rigid objects supported by the deployed model]
   avoid_for: [articulated mechanisms, complete room shells]
-  input_modes: [service-defined]
+  input_modes: [reference_image]
   output_kind: object
   asset_kinds: [object]
-  supports_reference_image: unknown
-  supports_text: unknown
+  supports_reference_image: true
+  supports_text: false
   supports_articulation: false
   output_traits: [generated_geometry]
   quality: model-dependent
@@ -25,7 +25,11 @@ server:
   host: 127.0.0.1
   port: 7002
 
-params:
-  backend: hunyuan3d
-  preload_pipeline: false
-  use_mini: false
+generation:
+  pipeline: assetserver.generation_pipelines.hunyuan3d
+  preload: true
+  model:
+    full_root: ${oc.env:HUNYUAN3D_MODEL_DIR,/models/Hunyuan3D-2}
+    mini_root: ${oc.env:HUNYUAN3D_MINI_MODEL_DIR,/models/Hunyuan3D-2mini}
+  defaults:
+    variant: full

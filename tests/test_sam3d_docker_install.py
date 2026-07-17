@@ -1,15 +1,17 @@
 from pathlib import Path
 
 
-def test_repository_fetches_are_shallow_retried_and_separate_layers():
-    installer = Path("scripts/install_sam3d_docker.sh").read_text()
+def test_repository_sources_are_copied_from_pinned_submodules():
     dockerfile = Path("docker/Dockerfile").read_text()
+    modules = Path(".gitmodules").read_text()
 
-    assert "fetch --depth 1" in installer
-    assert "for attempt in 1 2 3" in installer
-    assert "GIT_LFS_SKIP_SMUDGE=1" in installer
-    assert "--stage repos-objects" in dockerfile
-    assert "--stage repos-sam3" in dockerfile
+    assert "thirdparty/SAM3" in modules
+    assert "thirdparty/sam-3d-objects" in modules
+    assert "thirdparty/dinov2" in modules
+    assert "COPY thirdparty/SAM3 thirdparty/SAM3" in dockerfile
+    assert "COPY thirdparty/sam-3d-objects thirdparty/sam-3d-objects" in dockerfile
+    assert "COPY thirdparty/dinov2 thirdparty/dinov2" in dockerfile
+    assert "--stage repos" not in dockerfile
     assert "--stage sam3" in dockerfile
     assert "--stage inference" in dockerfile
 
@@ -37,14 +39,15 @@ def test_sam3d_image_uses_one_cuda_devel_base_and_installs_uv_from_pypi():
     assert "FROM sam3d-builder AS sam3d-runtime" in dockerfile
 
 
-def test_runtime_caches_are_routed_to_the_writable_cache_volume():
+def test_runtime_paths_are_owned_by_backend_config():
     dockerfile = Path("docker/Dockerfile").read_text()
+    runtime = dockerfile.split("FROM sam3d-builder AS sam3d-runtime", 1)[1].split(
+        "FROM builder-base AS openclip-runtime", 1
+    )[0]
+    config = Path("config/generate/sam3d.yaml").read_text()
 
-    assert "XDG_CACHE_HOME=/var/cache/sam3d/xdg" in dockerfile
-    assert "XDG_CONFIG_HOME=/var/cache/sam3d/config" in dockerfile
-    assert "MPLCONFIGDIR=/var/cache/sam3d/matplotlib" in dockerfile
-    assert "HF_HOME=/var/cache/sam3d/hf" in dockerfile
-    assert "TORCH_HOME=/var/cache/sam3d/torch" in dockerfile
-    assert "TORCH_EXTENSIONS_DIR=/var/cache/sam3d/torch-extensions" in dockerfile
-    assert "mkdir -p /var/lib/sam3d/assets /var/cache/sam3d/xdg" in dockerfile
-    assert "ln -s /var/cache/sam3d/xdg /home/sam3d/.cache" in dockerfile
+    assert "root: data/cache/sam3d" in config
+    assert "asset_root: data/assets" in config
+    assert "staging_root: data/jobs/staging" in config
+    assert "XDG_CACHE_HOME=" not in runtime
+    assert "SAM3D_MODEL_ROOT=" not in runtime

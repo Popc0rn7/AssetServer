@@ -25,7 +25,8 @@ judgment, workflow routing, or simulation policy.
 
 - Python 3.11
 - [`uv`](https://docs.astral.sh/uv/)
-- Docker and an NVIDIA GPU for GPU-backed workers
+- An NVIDIA GPU for GPU-backed workers
+- Docker only when using containerized workers
 
 Install the host environment:
 
@@ -65,6 +66,24 @@ curl --fail http://127.0.0.1:7010/v2/scene-schema
 Additional retrieval, generation, embedding, and postprocess services are
 started only when their backend configuration is enabled. See the Docker guide
 for service-specific build commands, model mounts, ports, and GPU settings.
+
+### Local SAM3D
+
+SAM3D can run directly from the checkout without Docker. Its source dependencies,
+model path, cache, and storage directories are declared by
+`config/generate/sam3d.yaml`.
+
+```bash
+git submodule update --init --depth 1 \
+  thirdparty/SAM3 thirdparty/sam-3d-objects thirdparty/dinov2
+uv sync --extra sam3d
+scripts/download_sam3d_ckpt.sh
+scripts/model_service.sh start sam3d --gpu 0
+```
+
+The local launcher only selects the Python environment and visible GPU; it does
+not override backend paths. Hunyuan3D local-process management is not currently
+supported.
 
 ## Configuration
 

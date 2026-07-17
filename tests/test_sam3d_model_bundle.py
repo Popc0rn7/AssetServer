@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from assetserver.sam3d_server.model_bundle import (
+from assetserver.generation_pipelines.sam3d.model_bundle import (
     ModelBundleError,
     create_manifest,
     validate_bundle,

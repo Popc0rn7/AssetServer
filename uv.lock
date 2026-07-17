@@ -108,7 +108,6 @@ sam3d = [
     { name = "pymeshfix" },
     { name = "pytorch3d" },
     { name = "roma" },
-    { name = "sam3" },
     { name = "scikit-image" },
     { name = "spconv-cu121" },
     { name = "timm" },
@@ -180,7 +179,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "roma", marker = "extra == 'sam3d'", specifier = "==1.5.1" },
     { name = "ruff", specifier = ">=0.15.21" },
-    { name = "sam3", marker = "extra == 'sam3d'", git = "https://github.com/facebookresearch/sam3.git?rev=11dec2936de97f2857c1f76b66d982d5a001155d" },
     { name = "scikit-image", marker = "extra == 'sam3d'", specifier = ">=0.23,<0.27" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "setuptools", specifier = "<71.0.0" },
@@ -2239,21 +2237,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ad/fe/cad1d9762868c7c5dc70c8620074df28ebb1a8e4c17d4c0cb031889c457e/safetensors-0.6.2-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:d944cea65fad0ead848b6ec2c37cc0b197194bec228f8020054742190e9312ac", size = 655957, upload-time = "2025-08-08T13:13:57.029Z" },
     { url = "https://files.pythonhosted.org/packages/59/a7/e2158e17bbe57d104f0abbd95dff60dda916cf277c9f9663b4bf9bad8b6e/safetensors-0.6.2-cp38-abi3-win32.whl", hash = "sha256:cab75ca7c064d3911411461151cb69380c9225798a20e712b102edda2542ddb1", size = 308926, upload-time = "2025-08-08T13:14:01.095Z" },
     { url = "https://files.pythonhosted.org/packages/2c/c3/c0be1135726618dc1e28d181b8c442403d8dbb9e273fd791de2d4384bcdd/safetensors-0.6.2-cp38-abi3-win_amd64.whl", hash = "sha256:c7b214870df923cbc1593c3faee16bec59ea462758699bd3fee399d00aac072c", size = 320192, upload-time = "2025-08-08T13:13:59.467Z" },
-]
-
-[[package]]
-name = "sam3"
-version = "0.1.0"
-source = { git = "https://github.com/facebookresearch/sam3.git?rev=11dec2936de97f2857c1f76b66d982d5a001155d#11dec2936de97f2857c1f76b66d982d5a001155d" }
-dependencies = [
-    { name = "ftfy" },
-    { name = "huggingface-hub" },
-    { name = "iopath" },
-    { name = "numpy" },
-    { name = "regex" },
-    { name = "timm" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
 ]
 
 [[package]]

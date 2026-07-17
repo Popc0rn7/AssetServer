@@ -1,32 +1,16 @@
 from omegaconf import OmegaConf
 
-from assetserver.asset_acquisition_server.server_app import (
-    AssetAcquisitionApp,
-    rewrite_sam3d_download_url,
-)
+from assetserver.asset_acquisition_server.server_app import AssetAcquisitionApp
 
 
-def test_gateway_exposes_backend_specific_sam3d_routes():
+def test_gateway_exposes_only_public_v2_generation_route():
     config = OmegaConf.create(
-        {
-            "server": {},
-            "docker": {"launch_backend": False},
-            "runtime": {},
-            "backends": {},
-        }
+        {"server": {}, "runtime": {}, "backends": {}}
     )
     paths = AssetAcquisitionApp(config=config).app.openapi()["paths"]
 
-    assert "/v1/generate/sam3d" in paths
-    assert "/v1/assets/sam3d/{asset_id}" in paths
-
-
-def test_gateway_rewrites_sam3d_asset_url():
-    body = {
-        "backend": "sam3d",
-        "asset": {"asset_id": "abc", "download_url": "/v1/sam3d/assets/abc"},
+    assert "/v2/generate/{backend}" in paths
+    generation_paths = {
+        path for path in paths if "generate" in path or "sam3d" in path
     }
-
-    assert rewrite_sam3d_download_url(body)["asset"]["download_url"] == (
-        "/v1/assets/sam3d/abc"
-    )
+    assert generation_paths == {"/v2/generate/{backend}"}

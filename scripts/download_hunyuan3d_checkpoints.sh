@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Download Hunyuan3D model weights into the layout expected by AssetServer.
-# Hunyuan3D source code lives in external/Hunyuan3D-2; model weights live under
+# Hunyuan3D source code lives in thirdparty/Hunyuan3D-2; model weights live under
 # checkpoints/.
 #
 # Usage:

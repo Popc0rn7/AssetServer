@@ -5,13 +5,10 @@
 # - No interactive prompts (auto-accept everything).
 # - Skips CUDA detection/installation (already in base image).
 # - Skips HuggingFace checkpoint download (mounted at runtime).
-# - Keeps: repo cloning, dependency installation, CUDA package builds.
+# - Uses source submodules copied into thirdparty/ by the Dockerfile.
 
 set -euo pipefail
 
-SAM3D_OBJECTS_COMMIT="${SAM3D_OBJECTS_COMMIT:-81a82373a3a7f4cbb00bd5b32aaf6b4d0f659ddd}"
-SAM3_COMMIT="${SAM3_COMMIT:-11dec2936de97f2857c1f76b66d982d5a001155d}"
-DINOV2_COMMIT="${DINOV2_COMMIT:-7764ea0f912e53c92e82eb78a2a1631e92725fc8}"
 GITHUB_URL_PREFIX="${GITHUB_URL_PREFIX:-https://github.com/}"
 GITHUB_URL_PREFIX="${GITHUB_URL_PREFIX%/}/"
 PYPI_INDEX_URL="${PYPI_INDEX_URL:-}"
@@ -28,17 +25,13 @@ usage() {
 Usage: scripts/install_sam3d_docker.sh [--stage N|NAME]
 
 Stages:
-  1, repos       Fetch both SAM3 / SAM 3D Objects repositories.
-  repos-objects  Fetch only SAM 3D Objects.
-  repos-sam3     Fetch only SAM3.
-  repos-dinov2   Fetch only DINOv2.
-  2, sam3        Install SAM3 editable package and torch_generic_nms.
-  3, core        Install SAM 3D Objects core requirements.
-  4, gsplat      Install gsplat.
-  5, nvdiffrast  Install and optionally precompile nvdiffrast.
-  6, kaolin      Install kaolin build tools and kaolin.
-  7, pytorch3d   Install pytorch3d.
-  8, inference   Install inference dependencies and MoGe.
+  sam3        Install SAM3 editable package and torch_generic_nms.
+  core        Install SAM 3D Objects core requirements.
+  gsplat      Install gsplat.
+  nvdiffrast  Install and optionally precompile nvdiffrast.
+  kaolin      Install kaolin build tools and kaolin.
+  pytorch3d   Install pytorch3d.
+  inference   Install inference dependencies and MoGe.
   all            Run every stage. Default.
 
 Environment:
@@ -79,29 +72,6 @@ github_url() {
     printf "%s%s" "$GITHUB_URL_PREFIX" "$path"
 }
 
-fetch_repo() {
-    local destination="$1"
-    local repository="$2"
-    local revision="$3"
-    local attempt
-
-    for attempt in 1 2 3; do
-        rm -rf "$destination"
-        mkdir -p "$destination"
-        (
-            cd "$destination"
-            git init --quiet
-            git remote add origin "$(github_url "$repository")"
-            GIT_LFS_SKIP_SMUDGE=1 git -c http.version=HTTP/1.1 fetch --depth 1 origin "$revision"
-            git checkout --detach FETCH_HEAD
-        ) && return 0
-        echo "Git fetch failed for ${repository} (attempt ${attempt}/3)" >&2
-        sleep $((attempt * 5))
-    done
-    echo "Failed to fetch ${repository} at ${revision}" >&2
-    return 1
-}
-
 uv_pip_install() {
     local attempt
     local args=(uv pip install)
@@ -133,37 +103,10 @@ print_header() {
     echo "Using UV_HTTP_TIMEOUT: ${UV_HTTP_TIMEOUT}"
 }
 
-run_stage_1_objects() {
-    echo ""
-    echo "Stage 1a: Fetching SAM 3D Objects..."
-    mkdir -p external
-    fetch_repo external/sam-3d-objects facebookresearch/sam-3d-objects.git \
-        "$SAM3D_OBJECTS_COMMIT"
-}
-
-run_stage_1_sam3() {
-    echo ""
-    echo "Stage 1b: Fetching SAM3..."
-    mkdir -p external
-    fetch_repo external/SAM3 facebookresearch/sam3.git "$SAM3_COMMIT"
-}
-
-run_stage_1_dinov2() {
-    echo ""
-    echo "Stage 1c: Fetching DINOv2..."
-    fetch_repo /opt/dinov2 facebookresearch/dinov2.git "$DINOV2_COMMIT"
-    rm -rf /opt/dinov2/.git
-}
-
-run_stage_1() {
-    run_stage_1_objects
-    run_stage_1_sam3
-}
-
 run_stage_2() {
     echo ""
     echo "Stage 2: Installing SAM3..."
-    cd external/SAM3
+    cd thirdparty/SAM3
     uv_pip_install .
     echo "SAM3 installed"
 
@@ -176,7 +119,7 @@ run_stage_2() {
 run_stage_3() {
     echo ""
     echo "Stage 3: Installing SAM 3D Objects core dependencies..."
-    cd external/sam-3d-objects
+    cd thirdparty/sam-3d-objects
     grep -v -E "^(torch|torchvision|torchaudio|cuda-python|nvidia-|MoGe|flash_attn|bpy|wandb|jupyter|tensorboard|Flask|webdataset|sagemaker)" requirements.txt > /tmp/filtered_requirements.txt
     uv_pip_install -r /tmp/filtered_requirements.txt
 }
@@ -259,19 +202,14 @@ run_stage_8() {
 
 run_selected_stage() {
     case "$STAGE" in
-        1|repos) run_stage_1 ;;
-        repos-objects) run_stage_1_objects ;;
-        repos-sam3) run_stage_1_sam3 ;;
-        repos-dinov2) run_stage_1_dinov2 ;;
-        2|sam3) run_stage_2 ;;
-        3|core) run_stage_3 ;;
-        4|gsplat) run_stage_4 ;;
-        5|nvdiffrast) run_stage_5 ;;
-        6|kaolin) run_stage_6 ;;
-        7|pytorch3d) run_stage_7 ;;
-        8|inference) run_stage_8 ;;
+        sam3) run_stage_2 ;;
+        core) run_stage_3 ;;
+        gsplat) run_stage_4 ;;
+        nvdiffrast) run_stage_5 ;;
+        kaolin) run_stage_6 ;;
+        pytorch3d) run_stage_7 ;;
+        inference) run_stage_8 ;;
         all)
-            run_stage_1
             run_stage_2
             run_stage_3
             run_stage_4

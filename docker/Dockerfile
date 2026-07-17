@@ -50,26 +50,21 @@ RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi 
 
 FROM builder-base AS sam3d-builder
 ARG TORCH_CUDA_ARCH_LIST
-ARG SAM3_REVISION
-ARG SAM3D_OBJECTS_REVISION
 ARG NVDIFFRAST_REVISION
 ARG PYTORCH3D_REVISION
 ARG MOGE_REVISION
-ARG DINOV2_REVISION
 ARG GITHUB_URL_PREFIX=""
 ARG PYPI_INDEX_URL=""
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} VIRTUAL_ENV=/opt/venv \
     GITHUB_URL_PREFIX=${GITHUB_URL_PREFIX} PYPI_INDEX_URL=${PYPI_INDEX_URL} \
-    SAM3_COMMIT=${SAM3_REVISION} SAM3D_OBJECTS_COMMIT=${SAM3D_OBJECTS_REVISION} \
     NVDIFFRAST_REVISION=${NVDIFFRAST_REVISION} \
-    PYTORCH3D_REVISION=${PYTORCH3D_REVISION} MOGE_REVISION=${MOGE_REVISION} \
-    DINOV2_COMMIT=${DINOV2_REVISION}
+    PYTORCH3D_REVISION=${PYTORCH3D_REVISION} MOGE_REVISION=${MOGE_REVISION}
 WORKDIR /app
 COPY scripts/install_sam3d_docker.sh scripts/install_sam3d_docker.sh
+COPY thirdparty/SAM3 thirdparty/SAM3
+COPY thirdparty/sam-3d-objects thirdparty/sam-3d-objects
+COPY thirdparty/dinov2 thirdparty/dinov2
 RUN ln -s /opt/venv .venv
-RUN bash scripts/install_sam3d_docker.sh --stage repos-objects
-RUN bash scripts/install_sam3d_docker.sh --stage repos-sam3
-RUN bash scripts/install_sam3d_docker.sh --stage repos-dinov2
 RUN bash scripts/install_sam3d_docker.sh --stage sam3
 RUN bash scripts/install_sam3d_docker.sh --stage core
 RUN bash scripts/install_sam3d_docker.sh --stage gsplat
@@ -85,33 +80,15 @@ FROM sam3d-builder AS sam3d-runtime
 ARG IMAGE_VERSION=dev
 ARG TORCH_CUDA_ARCH_LIST
 COPY docker/versions.env /etc/sam3d-versions.env
-RUN mkdir -p /opt/sam3d \
-    && mv /app/external/sam-3d-objects /opt/sam3d/sam-3d-objects \
-    && mv /app/external/SAM3 /opt/sam3d/SAM3 \
-    && find /opt/sam3d /opt/dinov2 -name .git -type d -prune -exec rm -rf {} + \
+RUN find /app/thirdparty -name .git -prune -exec rm -rf {} + \
     && useradd --create-home --uid 10001 sam3d \
-    && mkdir -p /var/lib/sam3d/assets /var/cache/sam3d/xdg \
-       /var/cache/sam3d/config /var/cache/sam3d/matplotlib \
-       /var/cache/sam3d/hf /var/cache/sam3d/torch \
-       /var/cache/sam3d/torch-extensions \
-    && ln -s /var/cache/sam3d/xdg /home/sam3d/.cache \
-    && chown -R sam3d:sam3d /var/lib/sam3d /var/cache/sam3d \
+    && mkdir -p /etc/assetserver \
     && printf '{"image_version":"%s","cuda_arch":"%s"}\n' \
        "${IMAGE_VERSION}" "${TORCH_CUDA_ARCH_LIST}" > /etc/sam3d-image.json
 LABEL org.opencontainers.image.title="AssetServer SAM3D" \
       org.opencontainers.image.version="${IMAGE_VERSION}"
 ENV PATH=/opt/venv/bin:$PATH \
-    PYTHONPATH=/app:/opt/sam3d/SAM3:/opt/sam3d/sam-3d-objects \
-    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-    XDG_CACHE_HOME=/var/cache/sam3d/xdg \
-    XDG_CONFIG_HOME=/var/cache/sam3d/config \
-    MPLCONFIGDIR=/var/cache/sam3d/matplotlib \
-    HF_HOME=/var/cache/sam3d/hf TORCH_HOME=/var/cache/sam3d/torch \
-    TORCH_EXTENSIONS_DIR=/var/cache/sam3d/torch-extensions \
-    SAM3D_MODEL_ROOT=/models SAM3D_DINOV2_SOURCE=/opt/dinov2 \
-    SAM3D_ASSET_ROOT=/data/sam3d-v1 \
-    ASSETSERVER_ASSET_ROOT=/data/assets \
-    ASSETSERVER_STAGING_ROOT=/data/jobs/staging \
+    PYTHONPATH=/app \
     SAM3D_IMAGE_VERSION=${IMAGE_VERSION}
 COPY assetserver/__init__.py \
      assetserver/asset_store.py \
@@ -119,14 +96,15 @@ COPY assetserver/__init__.py \
      assetserver/mesh_utils.py \
      assetserver/staging.py \
      /app/assetserver/
-COPY assetserver/sam3d_server /app/assetserver/sam3d_server
-COPY assetserver/geometry_generation_server/__init__.py \
-     assetserver/geometry_generation_server/cuda_env_setup.py \
-     assetserver/geometry_generation_server/sam3d_pipeline_manager.py \
-     /app/assetserver/geometry_generation_server/
+COPY assetserver/generation_server /app/assetserver/generation_server
+COPY assetserver/generation_pipelines/__init__.py \
+     /app/assetserver/generation_pipelines/__init__.py
+COPY assetserver/generation_pipelines/sam3d \
+     /app/assetserver/generation_pipelines/sam3d
+COPY assetserver/placement /app/assetserver/placement
 USER sam3d
 EXPOSE 7000
-ENTRYPOINT ["python", "-m", "assetserver.sam3d_server.standalone"]
+ENTRYPOINT ["python", "-m", "assetserver.generation_server.standalone", "--config", "/etc/assetserver/backend.yaml", "--host", "0.0.0.0"]
 
 FROM builder-base AS openclip-runtime
 ARG OPENCLIP_VERSION=3.2.0
@@ -198,6 +176,7 @@ COPY scripts/install_hunyuan3d_docker.sh /app/scripts/install_hunyuan3d_docker.s
 RUN bash scripts/install_hunyuan3d_docker.sh
 
 FROM hunyuan3d-builder AS hunyuan3d-runtime
+RUN mkdir -p /etc/assetserver
 ENV PYTHONPATH=/app \
     HUNYUAN3D_MODEL_DIR=/models/Hunyuan3D-2 \
     HUNYUAN3D_MINI_MODEL_DIR=/models/Hunyuan3D-2mini \
@@ -206,15 +185,16 @@ ENV PYTHONPATH=/app \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
 COPY assetserver/__init__.py \
-     assetserver/artifacts.py \
      assetserver/asset_store.py \
      assetserver/asset_normalization.py \
      assetserver/mesh_utils.py \
-     assetserver/scheduler.py \
      assetserver/staging.py \
      /app/assetserver/
-COPY assetserver/geometry_generation_server /app/assetserver/geometry_generation_server
-COPY assetserver/postprocess /app/assetserver/postprocess
-COPY assetserver/utils /app/assetserver/utils
+COPY assetserver/generation_server /app/assetserver/generation_server
+COPY assetserver/generation_pipelines/__init__.py \
+     /app/assetserver/generation_pipelines/__init__.py
+COPY assetserver/generation_pipelines/hunyuan3d \
+     /app/assetserver/generation_pipelines/hunyuan3d
+COPY assetserver/placement /app/assetserver/placement
 EXPOSE 7002
-CMD ["python", "-m", "assetserver.geometry_generation_server.standalone_server", "--host", "0.0.0.0", "--port", "7002", "--backend", "hunyuan3d"]
+ENTRYPOINT ["python", "-m", "assetserver.generation_server.standalone", "--config", "/etc/assetserver/backend.yaml", "--host", "0.0.0.0"]

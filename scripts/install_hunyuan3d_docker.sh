@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Non-interactive Hunyuan3D installation for Docker builds.
-# Source code is cloned into external/Hunyuan3D-2 during the image build.
+# Source code is cloned into thirdparty/Hunyuan3D-2 during the image build.
 # Model weights are mounted at runtime from checkpoints/Hunyuan3D-2.
 
 set -euo pipefail
@@ -37,19 +37,19 @@ if [ -n "$PYPI_INDEX_URL" ]; then
 fi
 echo "Using UV_HTTP_TIMEOUT: ${UV_HTTP_TIMEOUT}"
 
-mkdir -p external
+mkdir -p thirdparty
 
-if [ ! -d external/Hunyuan3D-2 ]; then
-    git clone "$(github_url "$HUNYUAN3D_REPO")" external/Hunyuan3D-2
+if [ ! -d thirdparty/Hunyuan3D-2 ]; then
+    git clone "$(github_url "$HUNYUAN3D_REPO")" thirdparty/Hunyuan3D-2
     echo "Cloned Hunyuan3D-2"
 else
-    echo "external/Hunyuan3D-2 already exists"
+    echo "thirdparty/Hunyuan3D-2 already exists"
 fi
 
 if [ -n "$HUNYUAN3D_COMMIT" ]; then
     echo "Checking out Hunyuan3D commit: ${HUNYUAN3D_COMMIT}"
-    git -C external/Hunyuan3D-2 fetch origin
-    git -C external/Hunyuan3D-2 checkout --detach "$HUNYUAN3D_COMMIT"
+    git -C thirdparty/Hunyuan3D-2 fetch origin
+    git -C thirdparty/Hunyuan3D-2 checkout --detach "$HUNYUAN3D_COMMIT"
 fi
 
 bash scripts/install_hunyuan3d.sh
