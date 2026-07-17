@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import gc
+import logging
 import os
 import shutil
 import sys
 import threading
-import logging
 import types
 
 from pathlib import Path
@@ -123,6 +124,7 @@ class SAM3DRuntime:
         self._ready = False
         self._error: str | None = "pipeline is loading"
         self._lock = threading.Lock()
+        self._generation_lock = threading.Lock()
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("XDG_CACHE_HOME", "/var/cache/sam3d/xdg")
@@ -147,9 +149,7 @@ class SAM3DRuntime:
     def _preload(self) -> None:
         try:
             install_kaolin_testing_shim()
-            force_local_dinov2_hub(
-                os.environ.get("SAM3D_DINOV2_SOURCE", "/opt/dinov2")
-            )
+            force_local_dinov2_hub(os.environ.get("SAM3D_DINOV2_SOURCE", "/opt/dinov2"))
             from assetserver.geometry_generation_server.sam3d_pipeline_manager import (
                 SAM3DPipelineManager,
             )
@@ -174,16 +174,54 @@ class SAM3DRuntime:
         healthy, error = self.readiness()
         if not healthy:
             raise RuntimeError(error or "pipeline not ready")
+
+        import torch
+
         from assetserver.geometry_generation_server.sam3d_pipeline_manager import (
             generate_with_sam3d,
         )
 
-        generate_with_sam3d(
-            image_path=image_path,
-            output_path=output_path,
-            sam3_checkpoint=self.bundle.sam3_checkpoint,
-            sam3d_checkpoint=self.bundle.pipeline_config,
-            debug_folder=None,
-            use_pipeline_caching=True,
-            **options,
+        # Keep the model resident, but isolate each request's temporary CUDA state.
+        # Upstream texture baking explicitly re-enables gradients where it needs them.
+        with self._generation_lock:
+            try:
+                with torch.inference_mode():
+                    generate_with_sam3d(
+                        image_path=image_path,
+                        output_path=output_path,
+                        sam3_checkpoint=self.bundle.sam3_checkpoint,
+                        sam3d_checkpoint=self.bundle.pipeline_config,
+                        debug_folder=None,
+                        use_pipeline_caching=True,
+                        **options,
+                    )
+            finally:
+                self._release_request_memory(torch)
+
+    @staticmethod
+    def _release_request_memory(torch) -> None:
+        """Release request-scoped objects and unused PyTorch CUDA cache."""
+        gc.collect()
+        if not torch.cuda.is_available():
+            return
+
+        try:
+            # Native CUDA extensions launch asynchronous work. Synchronize before
+            # measuring and returning their now-unused PyTorch allocations.
+            torch.cuda.synchronize()
+            allocated = torch.cuda.memory_allocated()
+            reserved_before = torch.cuda.memory_reserved()
+            torch.cuda.empty_cache()
+            reserved_after = torch.cuda.memory_reserved()
+        except Exception:
+            # Cleanup must never hide the original generation error.
+            logger.exception("SAM3D CUDA cleanup failed")
+            return
+
+        logger.info(
+            "SAM3D CUDA cleanup: allocated=%.1f MiB, "
+            "reserved_before=%.1f MiB, reserved_after=%.1f MiB",
+            allocated / 1024**2,
+            reserved_before / 1024**2,
+            reserved_after / 1024**2,
         )

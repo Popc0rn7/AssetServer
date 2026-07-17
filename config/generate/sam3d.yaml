@@ -1,7 +1,7 @@
 name: sam3d
 type: geometry_generation
 role: generate
-enabled: false
+enabled: true
 
 profile:
   display_name: SAM3D

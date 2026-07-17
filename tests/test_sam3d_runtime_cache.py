@@ -1,8 +1,10 @@
 import json
 import sys
+import threading
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
+import pytest
 import yaml
 
 from assetserver.sam3d_server.runtime import (
@@ -129,3 +131,102 @@ def test_runtime_passes_moge_checkpoint_file_not_snapshot_directory(
 
     assert runtime.bundle.moge_model == moge.resolve()
     assert __import__("os").environ["SAM3D_MOGE_MODEL_PATH"] == str(moge.resolve())
+
+
+def _ready_runtime() -> SAM3DRuntime:
+    runtime = SAM3DRuntime.__new__(SAM3DRuntime)
+    runtime.bundle = SimpleNamespace(
+        sam3_checkpoint="sam3.pt", pipeline_config="pipeline.yaml"
+    )
+    runtime._ready = True
+    runtime._error = None
+    runtime._lock = threading.Lock()
+    runtime._generation_lock = threading.Lock()
+    return runtime
+
+
+def _fake_torch(events: list[str]) -> ModuleType:
+    class InferenceMode:
+        def __enter__(self):
+            events.append("inference_enter")
+
+        def __exit__(self, *_):
+            events.append("inference_exit")
+
+    cuda = SimpleNamespace(
+        is_available=lambda: True,
+        synchronize=lambda: events.append("synchronize"),
+        memory_allocated=lambda: 3 * 1024**2,
+        memory_reserved=lambda: 5 * 1024**2,
+        empty_cache=lambda: events.append("empty_cache"),
+    )
+    torch = ModuleType("torch")
+    torch.cuda = cuda
+    torch.inference_mode = InferenceMode
+    return torch
+
+
+def test_generation_uses_inference_mode_and_releases_cuda_cache(monkeypatch, tmp_path):
+    events = []
+    calls = []
+    manager = ModuleType(
+        "assetserver.geometry_generation_server.sam3d_pipeline_manager"
+    )
+
+    def generate_with_sam3d(**kwargs):
+        events.append("generate")
+        calls.append(kwargs)
+
+    manager.generate_with_sam3d = generate_with_sam3d
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(events))
+    monkeypatch.setitem(
+        sys.modules,
+        "assetserver.geometry_generation_server.sam3d_pipeline_manager",
+        manager,
+    )
+    monkeypatch.setattr(
+        "assetserver.sam3d_server.runtime.gc.collect",
+        lambda: events.append("gc_collect"),
+    )
+
+    runtime = _ready_runtime()
+    runtime.generate(tmp_path / "input.png", tmp_path / "output.glb", threshold=0.4)
+
+    assert events == [
+        "inference_enter",
+        "generate",
+        "inference_exit",
+        "gc_collect",
+        "synchronize",
+        "empty_cache",
+    ]
+    assert calls[0]["use_pipeline_caching"] is True
+    assert calls[0]["threshold"] == 0.4
+
+
+def test_generation_failure_still_releases_cuda_cache(monkeypatch, tmp_path):
+    events = []
+    manager = ModuleType(
+        "assetserver.geometry_generation_server.sam3d_pipeline_manager"
+    )
+
+    def generate_with_sam3d(**_):
+        events.append("generate")
+        raise RuntimeError("generation failed")
+
+    manager.generate_with_sam3d = generate_with_sam3d
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(events))
+    monkeypatch.setitem(
+        sys.modules,
+        "assetserver.geometry_generation_server.sam3d_pipeline_manager",
+        manager,
+    )
+    monkeypatch.setattr(
+        "assetserver.sam3d_server.runtime.gc.collect",
+        lambda: events.append("gc_collect"),
+    )
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        _ready_runtime().generate(tmp_path / "input.png", tmp_path / "output.glb")
+
+    assert events[-3:] == ["gc_collect", "synchronize", "empty_cache"]

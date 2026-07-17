@@ -114,17 +114,16 @@ ENV PATH=/opt/venv/bin:$PATH \
     ASSETSERVER_STAGING_ROOT=/data/jobs/staging \
     SAM3D_IMAGE_VERSION=${IMAGE_VERSION}
 COPY assetserver/__init__.py \
-     assetserver/artifacts.py \
      assetserver/asset_store.py \
      assetserver/asset_normalization.py \
      assetserver/mesh_utils.py \
-     assetserver/scheduler.py \
      assetserver/staging.py \
      /app/assetserver/
 COPY assetserver/sam3d_server /app/assetserver/sam3d_server
-COPY assetserver/geometry_generation_server /app/assetserver/geometry_generation_server
-COPY assetserver/postprocess /app/assetserver/postprocess
-COPY assetserver/utils /app/assetserver/utils
+COPY assetserver/geometry_generation_server/__init__.py \
+     assetserver/geometry_generation_server/cuda_env_setup.py \
+     assetserver/geometry_generation_server/sam3d_pipeline_manager.py \
+     /app/assetserver/geometry_generation_server/
 USER sam3d
 EXPOSE 7000
 ENTRYPOINT ["python", "-m", "assetserver.sam3d_server.standalone"]

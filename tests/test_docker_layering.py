@@ -49,15 +49,24 @@ def test_hunyuan_reuses_torch_base_and_copies_source_last():
     ) < hunyuan.index("COPY assetserver/__init__.py")
 
 
-def test_sam3d_runtime_contains_its_lazy_pipeline_dependencies():
+def test_sam3d_runtime_copies_only_its_assetserver_import_closure():
     dockerfile = Path("docker/Dockerfile").read_text()
     runtime = dockerfile.split("FROM sam3d-builder AS sam3d-runtime", 1)[1].split(
         "FROM builder-base AS openclip-runtime", 1
     )[0]
 
-    assert "COPY assetserver/geometry_generation_server" in runtime
+    assert "assetserver/geometry_generation_server/__init__.py" in runtime
+    assert "assetserver/geometry_generation_server/cuda_env_setup.py" in runtime
+    assert "assetserver/geometry_generation_server/sam3d_pipeline_manager.py" in runtime
     assert "assetserver/mesh_utils.py" in runtime
-    assert "COPY assetserver/utils" in runtime
+    assert "assetserver/asset_store.py" in runtime
+    assert "assetserver/asset_normalization.py" in runtime
+    assert "assetserver/staging.py" in runtime
+    assert "assetserver/artifacts.py" not in runtime
+    assert "assetserver/scheduler.py" not in runtime
+    assert "COPY assetserver/postprocess" not in runtime
+    assert "COPY assetserver/utils" not in runtime
+    assert "assetserver/geometry_generation_server/server_app.py" not in runtime
 
 
 def test_registry_is_the_only_runtime_container_source():
@@ -83,9 +92,9 @@ def test_registry_is_the_only_runtime_container_source():
 
 def test_postprocess_target_is_cpu_only_and_minimal():
     dockerfile = Path("docker/Dockerfile").read_text()
-    runtime = dockerfile.split(
-        "FROM python:3.11-slim AS postprocess-runtime", 1
-    )[1].split("FROM nvidia/cuda:", 1)[0]
+    runtime = dockerfile.split("FROM python:3.11-slim AS postprocess-runtime", 1)[
+        1
+    ].split("FROM nvidia/cuda:", 1)[0]
 
     assert "coacd" in runtime
     assert "torch" not in runtime.lower()

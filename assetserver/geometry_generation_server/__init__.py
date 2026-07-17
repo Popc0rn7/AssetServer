@@ -7,55 +7,44 @@ For multi-GPU support, the server automatically detects available GPUs and
 spawns one worker process per GPU. Use CUDA_VISIBLE_DEVICES to control which
 GPUs are used.
 
-IMPORTANT: The server-related imports (GeometryGenerationServer, GeometryGenerationClient)
-do NOT initialize CUDA. CUDA-dependent imports (generate_geometry_from_image, pipeline
-managers) are accessed via lazy loading to avoid accidental CUDA initialization in the
-parent process when using multi-GPU mode.
+The package root retains only the historical client, DTO, and server exports. They are
+loaded lazily so importing a focused submodule does not pull legacy server dependencies
+into standalone model images. Pipeline managers and generation functions are internal
+implementation details and must be imported from their defining modules.
 """
-
-# Safe imports that don't initialize CUDA.
-from .client import GeometryGenerationClient
-from .dataclasses import (
-    GeometryGenerationServerRequest,
-    GeometryGenerationServerResponse,
-)
-from .server_manager import GeometryGenerationServer
-
-# Lazy imports for CUDA-dependent modules.
-# These should only be imported in GPU worker processes or when explicitly needed.
 
 
 def __getattr__(name: str):
-    """Lazy loading for CUDA-dependent modules.
+    """Load compatibility exports only when explicitly requested.
 
-    This prevents CUDA initialization in the parent process when using multi-GPU mode.
+    Besides preventing CUDA initialization in parent processes, this keeps focused
+    runtime images such as the standalone SAM3D service from importing the legacy
+    HTTP server and its unrelated postprocessing dependencies.
     """
-    if name == "generate_geometry_from_image":
-        from .geometry_generation import generate_geometry_from_image
+    if name == "GeometryGenerationClient":
+        from .client import GeometryGenerationClient
 
-        return generate_geometry_from_image
+        return GeometryGenerationClient
 
-    if name == "Hunyuan3DPipelineManager":
-        from .hunyuan3d_pipeline_manager import Hunyuan3DPipelineManager
+    if name in {
+        "GeometryGenerationServerRequest",
+        "GeometryGenerationServerResponse",
+    }:
+        from . import dataclasses
 
-        return Hunyuan3DPipelineManager
+        return getattr(dataclasses, name)
 
-    if name == "SAM3DPipelineManager":
-        from .sam3d_pipeline_manager import SAM3DPipelineManager
+    if name == "GeometryGenerationServer":
+        from .server_manager import GeometryGenerationServer
 
-        return SAM3DPipelineManager
+        return GeometryGenerationServer
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
-    # Safe imports (no CUDA initialization).
     "GeometryGenerationClient",
     "GeometryGenerationServer",
     "GeometryGenerationServerRequest",
     "GeometryGenerationServerResponse",
-    # Lazy imports (CUDA initialization on access).
-    "generate_geometry_from_image",
-    "Hunyuan3DPipelineManager",
-    "SAM3DPipelineManager",
 ]
