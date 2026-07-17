@@ -175,6 +175,7 @@ run_foreground() {
             "$PYTHON" -m assetserver.job_worker \
             --database "$PWD/data/jobs/jobs.sqlite3" \
             --handler observe=assetserver.scene_job_handlers:observe \
+            --handler asset_observe=assetserver.asset_observe:asset_observe \
             --handler validate=assetserver.scene_job_handlers:validate \
             --handler placement_proposal=assetserver.placement.engine:propose \
             --handler placement_repair=assetserver.placement.engine:repair \
@@ -262,6 +263,7 @@ start_one() {
             "$PYTHON" -m assetserver.job_worker \
             --database "$PWD/data/jobs/jobs.sqlite3" \
             --handler observe=assetserver.scene_job_handlers:observe \
+            --handler asset_observe=assetserver.asset_observe:asset_observe \
             --handler validate=assetserver.scene_job_handlers:validate \
             --handler placement_proposal=assetserver.placement.engine:propose \
             --handler placement_repair=assetserver.placement.engine:repair \

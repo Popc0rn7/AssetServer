@@ -27,6 +27,68 @@ _OBSERVATION_CUTAWAY = {
 }
 
 
+def canonical_perspective_distance(
+    extent,
+    direction,
+    *,
+    vertical_fov_degrees: float,
+    aspect_ratio: float,
+    margin: float,
+) -> float:
+    """Return the camera distance required to frame an axis-aligned box.
+
+    ``direction`` points from the box center towards the camera.  The result
+    accounts for both the projected width/height and the depth of every AABB
+    corner, so elongated assets remain inside the frame at oblique angles.
+    """
+    if len(extent) != 3 or len(direction) != 3:
+        raise BlenderRecipeError("extent and direction must have three components")
+    if any(not math.isfinite(float(value)) or float(value) < 0 for value in extent):
+        raise BlenderRecipeError("extent must be finite and non-negative")
+    if not math.isfinite(aspect_ratio) or aspect_ratio <= 0:
+        raise BlenderRecipeError("aspect ratio must be positive")
+    if not math.isfinite(margin) or margin < 1:
+        raise BlenderRecipeError("canonical perspective margin must be at least 1")
+    if not math.isfinite(vertical_fov_degrees) or not 0 < vertical_fov_degrees < 180:
+        raise BlenderRecipeError("canonical perspective FOV must be between 0 and 180")
+
+    length = math.sqrt(sum(float(value) ** 2 for value in direction))
+    if not math.isfinite(length) or length == 0:
+        raise BlenderRecipeError("camera direction must be finite and non-zero")
+    outward = tuple(float(value) / length for value in direction)
+    world_up = (0.0, 0.0, 1.0)
+    right = (
+        world_up[1] * outward[2] - world_up[2] * outward[1],
+        world_up[2] * outward[0] - world_up[0] * outward[2],
+        world_up[0] * outward[1] - world_up[1] * outward[0],
+    )
+    right_length = math.sqrt(sum(value * value for value in right))
+    if right_length < 1e-9:
+        right = (1.0, 0.0, 0.0)
+    else:
+        right = tuple(value / right_length for value in right)
+    up = (
+        outward[1] * right[2] - outward[2] * right[1],
+        outward[2] * right[0] - outward[0] * right[2],
+        outward[0] * right[1] - outward[1] * right[0],
+    )
+
+    half = tuple(float(value) / 2 for value in extent)
+
+    def support(axis):
+        return sum(abs(axis[index]) * half[index] for index in range(3))
+
+    half_width = support(right) * margin
+    half_height = support(up) * margin
+    half_depth = support(outward)
+    vertical_tangent = math.tan(math.radians(vertical_fov_degrees) / 2)
+    horizontal_tangent = vertical_tangent * aspect_ratio
+    return half_depth + max(
+        half_width / horizontal_tangent,
+        half_height / vertical_tangent,
+    )
+
+
 def observation_hidden_shell_roles(view: str) -> frozenset[str]:
     """Deterministic observation-only shell visibility policy."""
     try:
@@ -126,6 +188,30 @@ def render_recipe(
             role = obj.get("assetserver_procedural_shell_role")
             obj.hide_render = role in hidden_roles
         camera.location = center + Vector(offsets[view])
+        canonical_asset = recipe.get("canonical_asset_review")
+        if canonical_asset and view == "perspective":
+            direction = offsets[view]
+            fov = float(canonical_asset["perspective_fov_degrees"])
+            distance = canonical_perspective_distance(
+                extent,
+                direction,
+                vertical_fov_degrees=fov,
+                aspect_ratio=width / height,
+                margin=float(canonical_asset["margin"]),
+            )
+            camera.data.type = "PERSP"
+            camera.data.angle = math.radians(fov)
+            camera.location = center + Vector(direction).normalized() * distance
+        if canonical_asset and view in {"front", "side", "top"}:
+            camera.data.type = "ORTHO"
+            projected = {
+                "front": (float(extent.x), float(extent.z)),
+                "side": (float(extent.y), float(extent.z)),
+                "top": (float(extent.x), float(extent.y)),
+            }[view]
+            camera.data.ortho_scale = max(projected) * float(canonical_asset["margin"])
+        elif not (canonical_asset and view == "perspective"):
+            camera.data.type = "PERSP"
         camera.rotation_euler = (
             (center - camera.location).to_track_quat("-Z", "Y").to_euler()
         )
@@ -142,6 +228,8 @@ def render_recipe(
                 "intrinsics": _camera_intrinsics(camera.data, width, height),
                 "renderer": "BLENDER_EEVEE_NEXT",
                 "device": render_device,
+                "world_bounds": {"min": list(minimum), "max": list(maximum)},
+                "instance_scale": 1.0,
             }
         )
     if blend_path is not None:
@@ -204,6 +292,23 @@ def _build_scene(recipe: dict):
                 obj["assetserver_scene_instance"] = instance["name"]
             all_imported.extend(imported)
     bpy.context.view_layer.update()
+    if recipe.get("normalize_asset_ground_center") and all_imported:
+        from mathutils import Vector
+        minimum, maximum = _world_bounds(all_imported)
+        offset = Vector((-(minimum.x + maximum.x) / 2,
+                         -(minimum.y + maximum.y) / 2, -minimum.z))
+        roots = {obj for obj in all_imported if obj.parent is None}
+        # Imported objects are normally parented to an asset-frame, so move the
+        # top-most ancestor exactly once and never alter scale.
+        roots = set()
+        for obj in all_imported:
+            root = obj
+            while root.parent is not None:
+                root = root.parent
+            roots.add(root)
+        for root in roots:
+            root.location += offset
+        bpy.context.view_layer.update()
     return all_imported
 
 

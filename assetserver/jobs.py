@@ -41,8 +41,9 @@ class JobExecutionError(RuntimeError):
 class Job:
     job_id: str
     job_type: str
-    scene_id: str
-    scene_revision: int
+    subject_type: Literal["scene", "asset"]
+    subject_id: str
+    subject_revision: int | None
     request: dict[str, Any]
     request_hash: str
     status: JobStatus
@@ -63,6 +64,18 @@ class Job:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @property
+    def scene_id(self) -> str:
+        if self.subject_type != "scene":
+            raise AttributeError("asset jobs do not have a scene_id")
+        return self.subject_id
+
+    @property
+    def scene_revision(self) -> int:
+        if self.subject_type != "scene" or self.subject_revision is None:
+            raise AttributeError("asset jobs do not have a scene_revision")
+        return self.subject_revision
+
 
 class SQLiteJobStore:
     def __init__(self, path: str | Path, *, busy_timeout_ms: int = 5000) -> None:
@@ -81,7 +94,29 @@ class SQLiteJobStore:
         max_attempts: int = 3,
         cache_version: str | None = None,
     ) -> tuple[Job, bool]:
-        if not job_type or scene_revision < 1 or max_attempts < 1:
+        return self.submit_subject(
+            job_type, "scene", scene_id, scene_revision, request,
+            max_attempts=max_attempts, cache_version=cache_version,
+        )
+
+    def submit_asset(
+        self, job_type: str, asset_digest: str, request: dict[str, Any], *,
+        max_attempts: int = 3, cache_version: str | None = None,
+    ) -> tuple[Job, bool]:
+        return self.submit_subject(
+            job_type, "asset", asset_digest, None, request,
+            max_attempts=max_attempts, cache_version=cache_version,
+        )
+
+    def submit_subject(
+        self, job_type: str, subject_type: Literal["scene", "asset"],
+        subject_id: str, subject_revision: int | None, request: dict[str, Any], *,
+        max_attempts: int = 3, cache_version: str | None = None,
+    ) -> tuple[Job, bool]:
+        if (not job_type or not subject_id or max_attempts < 1 or
+            subject_type not in {"scene", "asset"} or
+            (subject_type == "scene" and (subject_revision is None or subject_revision < 1)) or
+            (subject_type == "asset" and subject_revision is not None)):
             raise ValueError("invalid job submission")
         request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
         cache_identity = json.dumps(
@@ -101,15 +136,14 @@ class SQLiteJobStore:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO jobs (
-                    job_id, job_type, scene_id, scene_revision, request_json,
+                    job_id, job_type, subject_type, subject_id, subject_revision, request_json,
                     request_hash, status, max_attempts, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     job_id,
                     job_type,
-                    scene_id,
-                    scene_revision,
+                    subject_type, subject_id, subject_revision,
                     request_json,
                     request_hash,
                     max_attempts,
@@ -120,9 +154,9 @@ class SQLiteJobStore:
             created = cursor.rowcount == 1
             if not created:
                 row = connection.execute(
-                    """SELECT * FROM jobs WHERE job_type=? AND scene_id=?
-                       AND scene_revision=? AND request_hash=?""",
-                    (job_type, scene_id, scene_revision, request_hash),
+                    """SELECT * FROM jobs WHERE job_type=? AND subject_type=? AND subject_id=?
+                       AND subject_revision IS ? AND request_hash=?""",
+                    (job_type, subject_type, subject_id, subject_revision, request_hash),
                 ).fetchone()
                 if row["status"] not in {"failed", "cancelled"}:
                     connection.commit()
@@ -137,15 +171,14 @@ class SQLiteJobStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO jobs (
-                        job_id, job_type, scene_id, scene_revision, request_json,
+                        job_id, job_type, subject_type, subject_id, subject_revision, request_json,
                         request_hash, status, max_attempts, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                     """,
                     (
                         job_id,
                         job_type,
-                        scene_id,
-                        scene_revision,
+                        subject_type, subject_id, subject_revision,
                         request_json,
                         request_hash,
                         max_attempts,
@@ -174,7 +207,8 @@ class SQLiteJobStore:
             raise JobNotFoundError(f"job not found: {job_id}")
         return self._job(row)
 
-    def claim(self, worker_id: str, *, lease_seconds: float = 60.0) -> Job | None:
+    def claim(self, worker_id: str, *, lease_seconds: float = 60.0,
+              job_types: set[str] | None = None) -> Job | None:
         if not worker_id or lease_seconds <= 0:
             raise ValueError("invalid worker lease")
         now = time.time()
@@ -190,14 +224,20 @@ class SQLiteJobStore:
                      AND attempt >= max_attempts""",
                 (now, now, now),
             )
+            type_clause = ""
+            parameters: list[Any] = [now]
+            if job_types:
+                type_clause = f" AND job_type IN ({','.join('?' for _ in job_types)})"
+                parameters.extend(sorted(job_types))
             row = connection.execute(
-                """
+                f"""
                 SELECT job_id FROM jobs
                 WHERE (status='queued' OR (status='running' AND lease_expires_at < ?))
                   AND attempt < max_attempts
+                  {type_clause}
                 ORDER BY created_at, job_id LIMIT 1
                 """,
-                (now,),
+                parameters,
             ).fetchone()
             if row is None:
                 connection.commit()
@@ -329,17 +369,42 @@ class SQLiteJobStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(
                     f"unsupported jobs database schema version: {version}"
+                )
+            if version == 1:
+                connection.executescript(
+                    """
+                    ALTER TABLE jobs RENAME TO jobs_v1;
+                    CREATE TABLE jobs (
+                        job_id TEXT PRIMARY KEY, job_type TEXT NOT NULL,
+                        subject_type TEXT NOT NULL CHECK(subject_type IN ('scene','asset')),
+                        subject_id TEXT NOT NULL, subject_revision INTEGER,
+                        request_json TEXT NOT NULL, request_hash TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+                        progress REAL NOT NULL DEFAULT 0, worker_id TEXT, lease_expires_at REAL,
+                        attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
+                        result_json TEXT, error_code TEXT, error_message TEXT,
+                        retryable INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+                        started_at REAL, finished_at REAL, updated_at REAL NOT NULL,
+                        UNIQUE(job_type, subject_type, subject_id, subject_revision, request_hash)
+                    );
+                    INSERT INTO jobs SELECT job_id,job_type,'scene',scene_id,scene_revision,
+                        request_json,request_hash,status,progress,worker_id,lease_expires_at,
+                        attempt,max_attempts,result_json,error_code,error_message,retryable,
+                        created_at,started_at,finished_at,updated_at FROM jobs_v1;
+                    DROP TABLE jobs_v1;
+                    """
                 )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
                     job_type TEXT NOT NULL,
-                    scene_id TEXT NOT NULL,
-                    scene_revision INTEGER NOT NULL,
+                    subject_type TEXT NOT NULL CHECK(subject_type IN ('scene','asset')),
+                    subject_id TEXT NOT NULL,
+                    subject_revision INTEGER,
                     request_json TEXT NOT NULL,
                     request_hash TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
@@ -356,13 +421,16 @@ class SQLiteJobStore:
                     started_at REAL,
                     finished_at REAL,
                     updated_at REAL NOT NULL,
-                    UNIQUE(job_type, scene_id, scene_revision, request_hash)
+                    UNIQUE(job_type, subject_type, subject_id, subject_revision, request_hash)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, created_at);
                 CREATE INDEX IF NOT EXISTS jobs_lease ON jobs(status, lease_expires_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS jobs_subject_cache
+                    ON jobs(job_type, subject_type, subject_id,
+                            COALESCE(subject_revision, 0), request_hash);
                 """
             )
-            connection.execute("PRAGMA user_version=1")
+            connection.execute("PRAGMA user_version=2")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -379,8 +447,9 @@ class SQLiteJobStore:
         return Job(
             job_id=row["job_id"],
             job_type=row["job_type"],
-            scene_id=row["scene_id"],
-            scene_revision=row["scene_revision"],
+            subject_type=row["subject_type"],
+            subject_id=row["subject_id"],
+            subject_revision=row["subject_revision"],
             request=json.loads(row["request_json"]),
             request_hash=row["request_hash"],
             status=row["status"],
@@ -419,7 +488,10 @@ class JobWorker:
         self.heartbeat_seconds = heartbeat_seconds
 
     def run_once(self) -> Job | None:
-        job = self.store.claim(self.worker_id, lease_seconds=self.lease_seconds)
+        job = self.store.claim(
+            self.worker_id, lease_seconds=self.lease_seconds,
+            job_types=set(self.handlers),
+        )
         if job is None:
             return None
         stop = threading.Event()

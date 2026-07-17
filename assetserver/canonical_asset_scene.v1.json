@@ -1,0 +1,13 @@
+{
+  "schema_version": "asset-canonical-scene/v1",
+  "units": "m",
+  "background": [0.055, 0.055, 0.055],
+  "ground": {"enabled": true, "z": 0.0},
+  "grid": {"enabled": true, "unit_m": 1.0},
+  "lights": ["key", "fill"],
+  "views": ["perspective", "front", "side", "top"],
+  "resolution": [512, 512],
+  "margin": 1.15,
+  "perspective_fov_degrees": 39.6,
+  "framing_algorithm_version": "bounds-framing/v2"
+}

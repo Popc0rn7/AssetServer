@@ -156,7 +156,7 @@ COPY scripts/build_scene_from_ir.py /app/scripts/build_scene_from_ir.py
 COPY scripts/smoke_scene_viewer.py /app/scripts/smoke_scene_viewer.py
 COPY scripts/check_procedural_room_canary.py /app/scripts/check_procedural_room_canary.py
 USER scene-viewer
-CMD ["python", "-m", "assetserver.job_worker", "--database", "/data/jobs/jobs.sqlite3", "--handler", "observe=assetserver.scene_job_handlers:observe", "--handler", "validate=assetserver.scene_job_handlers:validate", "--handler", "placement_proposal=assetserver.placement.engine:propose", "--handler", "placement_repair=assetserver.placement.engine:repair", "--handler", "export=assetserver.scene_job_handlers:export", "--lease-seconds", "300", "--heartbeat-seconds", "30"]
+CMD ["python", "-m", "assetserver.job_worker", "--database", "/data/jobs/jobs.sqlite3", "--handler", "observe=assetserver.scene_job_handlers:observe", "--handler", "asset_observe=assetserver.asset_observe:asset_observe", "--handler", "validate=assetserver.scene_job_handlers:validate", "--handler", "placement_proposal=assetserver.placement.engine:propose", "--handler", "placement_repair=assetserver.placement.engine:repair", "--handler", "export=assetserver.scene_job_handlers:export", "--lease-seconds", "300", "--heartbeat-seconds", "30"]
 
 FROM builder-base AS hunyuan3d-builder
 ARG GITHUB_URL_PREFIX=""

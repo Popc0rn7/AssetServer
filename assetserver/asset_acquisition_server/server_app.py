@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError
 from assetserver.artifacts import GLOBAL_ARTIFACTS, artifact_media_type
 from assetserver.artifact_store import Artifact, ArtifactCatalog
 from assetserver.asset_store import (
+    ASSET_REF_PREFIX,
     AssetStoreError,
     ContentAddressedAssetStore,
     StoredAsset,
@@ -246,6 +247,7 @@ class AssetAcquisitionApp:
 
     def _register_routes(self) -> None:
         self.app.add_api_route("/health", self._health_endpoint, methods=["GET"])
+        self.app.add_api_route("/health/ready", self._ready_endpoint, methods=["GET"])
         self.app.add_api_route("/tools", self._tools_endpoint, methods=["GET"])
         self.app.add_api_route("/backends", self._backends_endpoint, methods=["GET"])
         self.app.add_api_route("/history", self._history_endpoint, methods=["GET"])
@@ -279,6 +281,19 @@ class AssetAcquisitionApp:
             self._asset_download_v2_endpoint,
             methods=["GET"],
         )
+        if self._job_store is not None:
+            self.app.add_api_route(
+                "/v2/assets/{asset_digest}/observe",
+                self._submit_asset_observe_endpoint,
+                methods=["POST"],
+            )
+            if self._ir_scene_store is None:
+                self.app.add_api_route(
+                    "/v2/jobs/{job_id}", self._get_job_endpoint, methods=["GET"]
+                )
+                self.app.add_api_route(
+                    "/v2/jobs/{job_id}/cancel", self._cancel_job_endpoint, methods=["POST"]
+                )
         self.app.add_api_route(
             "/v2/artifacts/{artifact_id}",
             self._get_artifact_endpoint,
@@ -395,6 +410,26 @@ class AssetAcquisitionApp:
                 )
             },
         }
+
+    def _ready_endpoint(self) -> Response:
+        try:
+            from assetserver.asset_observe import canonical_scene
+            canonical = canonical_scene()
+        except Exception as exc:
+            return self._scene_error(503, "canonical_scene_unavailable", str(exc), retryable=False)
+        heartbeat = self._scene_data_root / "runtime" / "scene-worker-capabilities.json"
+        try:
+            value = json.loads(heartbeat.read_text())
+            valid = (
+                time.time() - float(value["updated_at"]) <= 15
+                and "asset_observe" in value.get("capabilities", [])
+                and value.get("canonical_scene_version") == canonical["schema_version"]
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            valid = False
+        if not valid:
+            return self._scene_error(503, "renderer_unavailable", "asset renderer capability heartbeat is unavailable or stale", retryable=True)
+        return JSONResponse({"status": "ready"})
 
     async def _create_ir_scene_endpoint(self, request: Request) -> JSONResponse:
         if request.headers.get("content-type", "").split(";", 1)[0] not in {
@@ -556,6 +591,54 @@ class AssetAcquisitionApp:
         self, scene_id: str, request: Request
     ) -> JSONResponse:
         return await self._submit_ir_job_endpoint(scene_id, request, "observe")
+
+    async def _submit_asset_observe_endpoint(
+        self, asset_digest: str, request: Request
+    ) -> JSONResponse:
+        if len(asset_digest) != 64 or any(c not in "0123456789abcdef" for c in asset_digest):
+            return self._scene_error(422, "invalid_asset_digest", "asset digest must be 64 lowercase hexadecimal characters")
+        if await request.body():
+            return self._scene_error(400, "request_body_not_allowed", "asset observe does not accept a request body")
+        asset_ref = f"{ASSET_REF_PREFIX}{asset_digest}"
+        try:
+            asset = self._asset_store.resolve(asset_ref)
+        except AssetStoreError as exc:
+            message = str(exc)
+            code = "asset_not_found" if "not found" in message else "asset_not_renderable"
+            return self._scene_error(404 if code == "asset_not_found" else 409, code, message)
+        visual = asset.manifest.get("visual")
+        try:
+            if not isinstance(visual, dict) or not visual.get("entrypoint"):
+                raise ValueError("asset has no visual entrypoint")
+            entries = [visual["entrypoint"]] + [p["entrypoint"] for p in visual.get("parts") or []]
+            if any(Path(name).suffix.lower() not in {".glb", ".gltf", ".obj"} for name in entries):
+                raise ValueError("asset visual format is not supported")
+            # resolve() verifies all declared file sizes and SHA-256 values.
+            from assetserver.asset_observe import canonical_scene
+            canonical = canonical_scene()
+        except (KeyError, ValueError, RuntimeError, OSError) as exc:
+            return self._scene_error(409, "asset_not_renderable", str(exc))
+        cache_version = (
+            f"asset-observe-worker/1+canonical={canonical['schema_version']}"
+            f"+framing={canonical['framing_algorithm_version']}"
+        )
+        job, created = self._job_store.submit_asset(
+            "asset_observe", asset_digest, {},
+            max_attempts=int(self._job_config().get("max_attempts", 3)),
+            cache_version=cache_version,
+        )
+        if not created and job.status == "completed" and job.result:
+            try:
+                retained = all(not self._catalog().get(item["artifact_id"]).gone for item in job.result.get("views", []))
+            except (KeyError, TypeError):
+                retained = False
+            if not retained:
+                self._job_store.delete_completed(job.job_id)
+                job, _ = self._job_store.submit_asset(
+                    "asset_observe", asset_digest, {},
+                    max_attempts=int(self._job_config().get("max_attempts", 3)), cache_version=cache_version,
+                )
+        return JSONResponse({"job_id": job.job_id, "status": job.status}, status_code=202)
 
     async def _submit_validate_job_endpoint(
         self, scene_id: str, request: Request
@@ -917,6 +1000,19 @@ class AssetAcquisitionApp:
         return path
 
     def _public_job(self, job) -> dict[str, Any]:
+        if job.subject_type == "asset":
+            payload = {
+                "job_id": job.job_id, "job_type": job.job_type,
+                "status": job.status, "progress": job.progress,
+                "attempt": job.attempt, "max_attempts": job.max_attempts,
+                "result": job.result,
+                "error": ({"code": job.error_code, "message": job.error_message,
+                           "retryable": job.retryable} if job.error_code else None),
+                "created_at": job.created_at, "started_at": job.started_at,
+                "finished_at": job.finished_at, "updated_at": job.updated_at,
+            }
+            self._assert_path_free(payload)
+            return payload
         allowed_request = {
             key: value
             for key, value in job.request.items()

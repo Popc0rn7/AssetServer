@@ -125,6 +125,53 @@ class ArtifactCatalog:
             )
         return self.get(artifact_id)
 
+    def publish_many(self, items: list[dict[str, Any]]) -> list[Artifact]:
+        """Publish a set of files in one catalog transaction.
+
+        Every input is validated and digested before the transaction.  Thus a
+        missing render can never leave a partially visible artifact set.
+        """
+        prepared = []
+        for item in items:
+            path = Path(item["path"]).resolve()
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            digest, size = _digest(path)
+            prepared.append((item, path, digest, size))
+        ids: list[str] = []
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for item, path, digest, size in prepared:
+                    row = connection.execute(
+                        "SELECT * FROM artifacts WHERE logical_key=? AND gone=0",
+                        (item["logical_key"],),
+                    ).fetchone()
+                    if row is not None:
+                        current = self._artifact(row)
+                        if (current.path.is_file() and current.sha256 == digest and
+                            current.size_bytes == size):
+                            ids.append(current.artifact_id)
+                            continue
+                        connection.execute(
+                            "UPDATE artifacts SET gone=1 WHERE artifact_id=?",
+                            (current.artifact_id,),
+                        )
+                    artifact_id = f"art_{uuid.uuid4().hex}"
+                    connection.execute(
+                        "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                        (artifact_id, item["logical_key"], item["kind"],
+                         item["media_type"], str(path), digest, size, time.time(),
+                         json.dumps(item.get("provenance") or {}, sort_keys=True),
+                         json.dumps(item.get("metadata") or {}, sort_keys=True)),
+                    )
+                    ids.append(artifact_id)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return [self.get(artifact_id) for artifact_id in ids]
+
     def get(self, artifact_id: str) -> Artifact:
         if not artifact_id.startswith("art_"):
             raise KeyError(artifact_id)
