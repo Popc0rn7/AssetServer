@@ -87,7 +87,16 @@ def seed_dinov2_cache(
         raise RuntimeError(f"DINOv2 source missing from image: {source}")
     if not (source / "hubconf.py").is_file():
         raise RuntimeError(f"DINOv2 hubconf.py missing from image: {source}")
-    shutil.copytree(source, repo, dirs_exist_ok=True)
+    # A local development checkout contains read-only Git pack files. They are
+    # irrelevant to torch.hub and cannot be overwritten by a later seed pass.
+    # Excluding VCS and bytecode state also keeps the runtime cache reproducible
+    # between Docker image sources and host checkouts.
+    shutil.copytree(
+        source,
+        repo,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.py[co]"),
+    )
     checkpoints.mkdir(parents=True, exist_ok=True)
     cached_weight = checkpoints / "dinov2_vitl14_reg4_pretrain.pth"
     if cached_weight.exists() or cached_weight.is_symlink():

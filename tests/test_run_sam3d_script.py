@@ -29,14 +29,14 @@ def test_container_manager_is_the_only_build_run_interface():
 
 
 def test_local_sam3d_launcher_uses_authoritative_backend_config():
-    launcher = Path("scripts/model_service.sh").read_text()
+    launcher = Path("scripts/launch_service.sh").read_text()
 
     assert "config/generate/sam3d.yaml" in launcher
+    assert "assetserver.generation_server.standalone" in launcher
     assert "CUDA_VISIBLE_DEVICES" in launcher
     assert "SAM3D_MODEL_ROOT" not in launcher
     assert "SAM3D_DINOV2_SOURCE" not in launcher
     assert "ASSETSERVER_ASSET_ROOT" not in launcher
-    assert launcher.count("PYTHONPATH=") == 1  # OpenCLIP only.
 
 
 def test_sam3d_docker_endpoint_is_derived_from_backend_config(tmp_path, monkeypatch):

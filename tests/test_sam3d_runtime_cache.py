@@ -48,6 +48,28 @@ def test_seed_dinov2_cache_rebuilds_from_image_code_and_model_weight(tmp_path):
     assert cached_weight.read_bytes() == b"weights"
 
 
+def test_seed_dinov2_cache_ignores_checkout_metadata(tmp_path):
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "hubconf.py").write_text("# local code\n")
+    git_objects = source / ".git" / "objects" / "pack"
+    git_objects.mkdir(parents=True)
+    pack = git_objects / "source.pack"
+    pack.write_bytes(b"git metadata")
+    pack.chmod(0o444)
+    weight = tmp_path / "dinov2.pth"
+    weight.write_bytes(b"weights")
+    torch_home = tmp_path / "torch"
+
+    bundle = SimpleNamespace(dino_weights=weight)
+    seed_dinov2_cache(bundle, source_root=source, torch_home=torch_home)
+    seed_dinov2_cache(bundle, source_root=source, torch_home=torch_home)
+
+    cached_repo = torch_home / "hub/facebookresearch_dinov2_main"
+    assert (cached_repo / "hubconf.py").is_file()
+    assert not (cached_repo / ".git").exists()
+
+
 def test_dinov2_github_hub_call_is_forced_to_local_source(tmp_path, monkeypatch):
     source = tmp_path / "dinov2"
     source.mkdir()

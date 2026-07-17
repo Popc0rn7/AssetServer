@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11, <3.12"
 dependencies = [
     "colorama>=0.4.6",
-    "coacd>=1.0.7",
     "fastapi>=0.115.0",
     "hydra-core>=1.3.2",
     "huggingface-hub>=0.34.0,<1.0",
@@ -28,33 +27,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Standalone OpenCLIP service. Keep the Torch pair aligned with the CUDA 12.4
-# Docker images and the SAM3D extra so selecting both extras installs one copy.
-openclip = [
-    "open-clip-torch==3.2.0",
-    "torch==2.5.1",
-    "torchvision==0.20.1",
-]
-
 # Curated SAM3D inference environment. Do not depend directly on the upstream
 # sam3d_objects package metadata: it includes its training, notebook, Blender,
 # and CUDA 12.1 environments. Its pinned source checkout is prepared separately
 # by the local SAM3D setup script.
 sam3d = [
+    "astor==0.8.1",
     "decord==0.6.0",
     "easydict==1.13",
     "einops-exts==0.0.4",
     "fvcore==0.1.5.post20221221",
     "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7",
+    "igraph==0.11.8",
     "imageio>=2.37,<3",
     "iopath==0.1.10",
+    "lightning==2.3.3",
     "loguru>=0.7.2,<0.8",
     "moge @ git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b",
     "ninja>=1.13.0",
     "nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git@v0.4.0",
     "open3d==0.18.0",
     "opencv-python>=4.9,<5",
+    "optree==0.14.1",
     "point-cloud-utils==0.29.5",
+    "psutil>=7,<8",
     "pybind11>=3.0.1",
     "pycocotools>=2.0.7,<3",
     "pymeshfix==0.17.0",
@@ -75,6 +71,15 @@ asset-acquisition-server = "assetserver.asset_acquisition_server.standalone_serv
 assetserver-job-worker = "assetserver.job_worker:main"
 
 [dependency-groups]
+postprocess = [
+    "coacd>=1.0.7",
+]
+
+scene-viewer = [
+    "bpy==4.5.4",
+    "drake==1.47.0",
+]
+
 dev = [
     "autoflake>=2.3.1",
     "black>=25.1.0",
@@ -85,21 +90,18 @@ dev = [
 ]
 
 retrieve = [
-    "objathor>=0.0.8",
-    "open-clip-torch>=2.20.0",
-    "torch>=2.5.0,<2.6.0",
-    "torchvision>=0.20.0,<0.21.0",
+    "open-clip-torch==3.2.0",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
 ]
 
-generate = [
-    "diffusers>=0.35.1",
-    "einops>=0.8.1",
-    "ninja>=1.13.0",
-    "pybind11>=3.0.1",
-    "torch>=2.5.0,<2.6.0",
-    "torchvision>=0.20.0,<0.21.0",
-    "transformers>=4.55.4",
-]
+[tool.uv.sources]
+bpy = { index = "blender" }
+
+[[tool.uv.index]]
+name = "blender"
+url = "https://download.blender.org/pypi/"
+explicit = true
 
 [tool.uv.extra-build-dependencies]
 gsplat = ["torch==2.5.1"]

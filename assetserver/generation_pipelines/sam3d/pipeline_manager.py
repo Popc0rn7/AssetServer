@@ -112,7 +112,8 @@ class SAM3DPipelineManager:
         except ImportError as e:
             console_logger.error(f"Import failed: {e}")
             raise ImportError(
-                "SAM3D is not installed. Please run scripts/install_sam3d.sh"
+                "SAM3D runtime dependency import failed: "
+                f"{e}. Run 'uv sync --extra sam3d' and verify thirdparty sources."
             ) from e
 
         # Monkey-patch render_utils to use gsplat backend instead of inria.

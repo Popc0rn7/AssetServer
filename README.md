@@ -31,8 +31,29 @@ judgment, workflow routing, or simulation policy.
 Install the host environment:
 
 ```bash
-uv sync --group generate --group retrieve
+uv sync
 ```
+
+Install either local worker environment only when it is needed:
+
+```bash
+uv sync --group scene-viewer
+uv sync --group postprocess
+uv sync --group retrieve
+```
+
+Manage the four local services with one lifecycle command:
+
+```bash
+scripts/launch_service.sh start all
+scripts/launch_service.sh status
+scripts/launch_service.sh logs scene-viewer
+scripts/launch_service.sh stop all
+```
+
+The supported service names are `openclip`, `sam3d`, `scene-viewer`, and
+`postprocess`. Use `run SERVICE` instead of `start SERVICE` to keep one service
+in the foreground.
 
 ## Quick Start
 
@@ -78,7 +99,7 @@ git submodule update --init --depth 1 \
   thirdparty/SAM3 thirdparty/sam-3d-objects thirdparty/dinov2
 uv sync --extra sam3d
 scripts/download_sam3d_ckpt.sh
-scripts/model_service.sh start sam3d --gpu 0
+scripts/launch_service.sh start sam3d --gpu 0
 ```
 
 The local launcher only selects the Python environment and visible GPU; it does

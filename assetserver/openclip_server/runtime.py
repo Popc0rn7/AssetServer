@@ -39,6 +39,10 @@ class OpenCLIPRuntime:
     def start_preload(self) -> None:
         threading.Thread(target=self._preload, daemon=True).start()
 
+    def preload(self) -> None:
+        """Load on the calling thread for foreground process ownership."""
+        self._preload()
+
     def _preload(self) -> None:
         try:
             import open_clip

@@ -1,7 +1,7 @@
 name: articulated
 type: articulated
 role: retrieve
-enabled: false
+enabled: true
 embedding_provider: openclip
 
 profile:

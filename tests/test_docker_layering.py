@@ -42,8 +42,7 @@ def test_hunyuan_reuses_torch_base_and_copies_source_last():
     dockerfile = Path("docker/Dockerfile").read_text()
     hunyuan = dockerfile.split("FROM builder-base AS hunyuan3d-builder", 1)[1]
 
-    assert "uv sync --active --frozen" in hunyuan
-    assert "--no-install-project" in hunyuan
+    assert "--group generate" not in hunyuan
     assert hunyuan.index(
         "RUN bash scripts/install_hunyuan3d_docker.sh"
     ) < hunyuan.index("COPY assetserver/__init__.py")

@@ -65,8 +65,12 @@ containers or starting the Gateway.
 Install the host tools first:
 
 ```bash
-uv sync --group generate --group retrieve
+uv sync
 ```
+
+The Docker lifecycle itself does not require model runtime dependencies on the
+host. To run OpenCLIP locally, additionally install `--group retrieve`; local
+SAM3D development uses `--extra sam3d`.
 
 ### Model checkpoints
 

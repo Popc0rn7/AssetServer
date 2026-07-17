@@ -168,9 +168,6 @@ ENV GITHUB_URL_PREFIX=${GITHUB_URL_PREFIX} \
     HUNYUAN3D_COMMIT=${HUNYUAN3D_COMMIT} \
     PYPI_INDEX_URL=${PYPI_INDEX_URL}
 WORKDIR /app
-COPY pyproject.toml uv.lock .python-version ./
-RUN if [ -n "$PYPI_INDEX_URL" ]; then export UV_INDEX_URL="$PYPI_INDEX_URL"; fi \
-    && uv sync --active --frozen --inexact --no-dev --group generate --no-install-project
 COPY scripts/install_hunyuan3d.sh /app/scripts/install_hunyuan3d.sh
 COPY scripts/install_hunyuan3d_docker.sh /app/scripts/install_hunyuan3d_docker.sh
 RUN bash scripts/install_hunyuan3d_docker.sh

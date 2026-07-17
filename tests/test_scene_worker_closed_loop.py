@@ -82,6 +82,10 @@ async def test_post_observe_validate_export_through_real_job_worker(
         return rendered
 
     monkeypatch.setattr(handlers, "render_recipe", render)
+    # The renderer is stubbed in this closed-loop test, so its placeholder
+    # .blend and Drake package must not be passed to installed native runtimes.
+    monkeypatch.setattr(handlers, "_validate_blend", lambda path: None)
+    monkeypatch.setattr(handlers, "_validate_drake_package", lambda package: None)
     monkeypatch.setattr(
         handlers,
         "_validate_result",

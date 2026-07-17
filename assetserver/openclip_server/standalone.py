@@ -20,7 +20,10 @@ def main() -> None:
         image_embed=runtime.embed_images,
         model_info=runtime.model_info,
     )
-    runtime.start_preload()
+    if os.environ.get("OPENCLIP_PRELOAD_SYNC", "0") == "1":
+        runtime.preload()
+    else:
+        runtime.start_preload()
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("OPENCLIP_PORT", "7006")))
 
 

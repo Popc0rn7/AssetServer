@@ -1,7 +1,7 @@
 name: materials
 type: materials
 role: retrieve
-enabled: false
+enabled: true
 embedding_provider: openclip
 
 profile:

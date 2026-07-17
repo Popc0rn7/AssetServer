@@ -30,7 +30,7 @@ echo
 # Check for required Python environment.
 if ! python -c "import objathor" 2>/dev/null; then
     echo "Error: objathor package not found."
-    echo "Run 'uv sync' to install dependencies."
+    echo "Run this downloader with 'uv run --with objathor scripts/download_objaverse_data.sh'."
     exit 1
 fi
 
